@@ -22,6 +22,37 @@ ACCENT_G_DK= "#1B5E20"
 ROW_ALT    = "#FFF5F5"
 
 
+# ─── Helper validasi input ────────────────────────────────────────────────────
+def _make_digit_validator(root):
+    """Return (vcmd, 'key') untuk Entry agar hanya menerima digit."""
+    def _validate(new_val):
+        return new_val == "" or new_val.isdigit()
+    vcmd = (root.register(_validate), "%P")
+    return vcmd
+
+
+def _apply_harga_x1000(entry: tk.Entry, preview_lbl: tk.Label = None):
+    """FocusOut: ambil angka di entry, kalikan 1000, tulis kembali."""
+    raw = entry.get().strip()
+    if raw.isdigit() and raw != "":
+        nilai = int(raw) * 1000
+        entry.delete(0, "end")
+        entry.insert(0, str(nilai))
+        if preview_lbl:
+            preview_lbl.config(text=f"= Rp {nilai:,.0f}")
+    elif preview_lbl:
+        preview_lbl.config(text="")
+
+
+def _on_harga_keyrelease(entry: tk.Entry, preview_lbl: tk.Label):
+    """KeyRelease: tampilkan preview × 1000 secara realtime."""
+    raw = entry.get().strip()
+    if raw.isdigit() and raw != "":
+        preview_lbl.config(text=f"→ Rp {int(raw) * 1000:,.0f}")
+    else:
+        preview_lbl.config(text="")
+
+
 def load_thumbnail(foto: str, size=(50, 50)):
     """Muat gambar produk sebagai PhotoImage. Return None jika tidak ada."""
     if not foto:
@@ -259,19 +290,49 @@ class BarangForm(tk.Toplevel):
         body.pack(fill="both", expand=True)
 
         # ── Field teks ────────────────────────────────────────────────────────
-        fields = [("Nama Barang", "nama"), ("Harga (Rp)", "harga"), ("Stok", "stok")]
+        vcmd = _make_digit_validator(self)
+
+        # Nama Barang
+        tk.Label(body, text="Nama Barang", font=("Segoe UI", 10, "bold"),
+                 bg=WHITE, fg=DARK_TEXT, anchor="w").pack(fill="x", pady=(0, 2))
         self.entries = {}
-        for label, key in fields:
-            tk.Label(body, text=label, font=("Segoe UI", 10, "bold"),
-                     bg=WHITE, fg=DARK_TEXT, anchor="w").pack(fill="x", pady=(0, 2))
-            ent = tk.Entry(body, font=("Segoe UI", 11), relief="solid", bd=1,
-                           bg=LIGHT_GRAY)
-            ent.pack(fill="x", ipady=7, pady=(0, 10))
-            self.entries[key] = ent
+        ent_nama = tk.Entry(body, font=("Segoe UI", 11), relief="solid", bd=1, bg=LIGHT_GRAY)
+        ent_nama.pack(fill="x", ipady=7, pady=(0, 10))
+        self.entries["nama"] = ent_nama
+
+        # Harga — hanya angka + ×1000 saat focus out
+        tk.Label(body, text="Harga (Rp)  ✦ ketik angka → otomatis ×1000",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=WHITE, fg=DARK_TEXT, anchor="w").pack(fill="x", pady=(0, 2))
+        ent_harga = tk.Entry(body, font=("Segoe UI", 11), relief="solid", bd=1,
+                             bg=LIGHT_GRAY, validate="key", validatecommand=vcmd)
+        ent_harga.pack(fill="x", ipady=7, pady=(0, 2))
+        self.entries["harga"] = ent_harga
+
+        self.lbl_harga_preview = tk.Label(body, text="",
+                                           font=("Segoe UI", 9, "italic"),
+                                           bg=WHITE, fg="#1565C0", anchor="e")
+        self.lbl_harga_preview.pack(fill="x", pady=(0, 8))
+
+        ent_harga.bind("<KeyRelease>",
+                       lambda e: _on_harga_keyrelease(ent_harga, self.lbl_harga_preview))
+        ent_harga.bind("<FocusOut>",
+                       lambda e: _apply_harga_x1000(ent_harga, self.lbl_harga_preview))
+
+        # Stok — hanya angka
+        tk.Label(body, text="Stok", font=("Segoe UI", 10, "bold"),
+                 bg=WHITE, fg=DARK_TEXT, anchor="w").pack(fill="x", pady=(0, 2))
+        ent_stok = tk.Entry(body, font=("Segoe UI", 11), relief="solid", bd=1,
+                            bg=LIGHT_GRAY, validate="key", validatecommand=vcmd)
+        ent_stok.pack(fill="x", ipady=7, pady=(0, 10))
+        self.entries["stok"] = ent_stok
 
         if self.mode == "edit" and self.data:
             self.entries["nama"].insert(0,  self.data.get("nama_barang", ""))
-            self.entries["harga"].insert(0, str(self.data.get("harga_barang", "")))
+            # Harga edit: tampilkan nilai asli (sudah dalam ribuan)
+            harga_asli = str(int(self.data.get("harga_barang", 0)))
+            self.entries["harga"].insert(0, harga_asli)
+            self.lbl_harga_preview.config(text=f"= Rp {int(harga_asli):,.0f}")
             self.entries["stok"].insert(0,  str(self.data.get("stok", "")))
 
         # ── Foto ──────────────────────────────────────────────────────────────
@@ -396,6 +457,9 @@ class BarangForm(tk.Toplevel):
 
     # ── Simpan ────────────────────────────────────────────────────────────────
     def _simpan(self):
+        # Pastikan harga sudah di-×1000 sebelum simpan
+        _apply_harga_x1000(self.entries["harga"], self.lbl_harga_preview)
+
         nama  = self.entries["nama"].get().strip()
         harga = self.entries["harga"].get().strip()
         stok  = self.entries["stok"].get().strip()
@@ -404,8 +468,8 @@ class BarangForm(tk.Toplevel):
             messagebox.showwarning("Validasi", "Nama barang tidak boleh kosong!", parent=self)
             return
         try:
-            harga_val = float(harga.replace(",", "").replace(".", ""))
-            stok_val  = int(stok)
+            harga_val = float(harga) if harga else 0.0
+            stok_val  = int(stok)    if stok  else 0
             if harga_val < 0 or stok_val < 0:
                 raise ValueError
         except ValueError:
@@ -482,7 +546,9 @@ class UpdateCepatForm(tk.Toplevel):
         self.combo.bind("<<ComboboxSelected>>", self._on_select_barang)
 
         tk.Label(body, text="Tambah Stok (opsional)", font=("Segoe UI", 10, "bold"), bg=WHITE).pack(anchor="w")
-        self.ent_stok = tk.Entry(body, font=("Segoe UI", 11), relief="solid", bd=1, bg=LIGHT_GRAY)
+        vcmd_uc = _make_digit_validator(self)
+        self.ent_stok = tk.Entry(body, font=("Segoe UI", 11), relief="solid", bd=1,
+                                  bg=LIGHT_GRAY, validate="key", validatecommand=vcmd_uc)
         self.ent_stok.pack(fill="x", pady=(2, 15), ipady=7)
 
         tk.Label(body, text="Update Foto", font=("Segoe UI", 10, "bold"), bg=WHITE).pack(anchor="w", pady=(0, 4))

@@ -88,7 +88,7 @@ class TransaksiWindow(tk.Toplevel):
                      side="left", padx=20, pady=16)
         tk.Button(hdr, text="Kembali", font=("Segoe UI", 9),
                   bg=PRIMARY_DK, fg=WHITE, relief="flat", padx=12, pady=5,
-                  cursor="hand2", command=self.destroy).pack(side="right", padx=16)
+                  cursor="hand2", command=self._kembali).pack(side="right", padx=16)
 
         body = tk.Frame(self, bg=LIGHT_GRAY)
         body.pack(fill="both", expand=True)
@@ -399,6 +399,14 @@ class TransaksiWindow(tk.Toplevel):
         tk.Button(pop, text="OK, Tutup", font=("Segoe UI", 11, "bold"),
                   bg=ACCENT_G, fg=WHITE, relief="flat", padx=20, pady=8,
                   cursor="hand2", command=pop.destroy).pack()
+
+    def _kembali(self):
+        """Tutup window transaksi dan kembali ke halaman pilih mode."""
+        if hasattr(self.master, "_on_child_close"):
+            self.master._on_child_close(self)
+        else:
+            self.destroy()
+            self.master.deiconify()
 
     def _notif(self, msg: str, error: bool = False):
         self.lbl_notif.config(text=msg, fg=PRIMARY if error else ACCENT_G)

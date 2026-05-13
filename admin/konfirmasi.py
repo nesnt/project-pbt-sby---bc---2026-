@@ -5,6 +5,7 @@ Aplikasi Business Center SMKN 13 Bandung
 
 import tkinter as tk
 from tkinter import ttk, messagebox
+import pymysql.cursors
 from db import execute_query, get_connection
 
 PRIMARY    = "#CC0000"
@@ -44,7 +45,10 @@ class KonfirmasiPanel(tk.Frame):
                  bg=WHITE, fg=DARK_TEXT).pack(side="left", padx=24, pady=14)
         tk.Button(hdr, text="🔄 Refresh", font=("Segoe UI", 9),
                   bg=LIGHT_GRAY, fg=DARK_TEXT, relief="flat", padx=10, pady=5,
-                  cursor="hand2", command=self._refresh).pack(side="right", padx=16)
+                  cursor="hand2", command=self._refresh).pack(side="right", padx=4)
+        tk.Button(hdr, text="🗑  Hapus Semua Histori", font=("Segoe UI", 9, "bold"),
+                  bg="#B71C1C", fg=WHITE, relief="flat", padx=10, pady=5,
+                  cursor="hand2", command=self._hapus_semua_histori).pack(side="right", padx=(16, 4))
 
         # Filter tabs
         tab_bar = tk.Frame(self, bg=WHITE)
@@ -173,7 +177,17 @@ class KonfirmasiPanel(tk.Frame):
             state="disabled", activebackground=PRIMARY_DK, activeforeground=WHITE,
             command=self._tolak_pesanan
         )
-        self.btn_tolak.pack(fill="x")
+        self.btn_tolak.pack(fill="x", pady=(0, 6))
+
+        tk.Frame(aksi_frame, bg="#DDDDDD", height=1).pack(fill="x", pady=(4, 6))
+
+        self.btn_hapus = tk.Button(
+            aksi_frame, text="🗑  Hapus Pesanan Ini", font=("Segoe UI", 9, "bold"),
+            bg="#37474F", fg=WHITE, relief="flat", pady=7, cursor="hand2",
+            state="disabled", activebackground="#263238", activeforeground=WHITE,
+            command=self._hapus_pesanan
+        )
+        self.btn_hapus.pack(fill="x")
 
     # ── Filter ────────────────────────────────────────────────────────────────
     def _set_filter(self, key: str, init: bool = False):
@@ -246,13 +260,15 @@ class KonfirmasiPanel(tk.Frame):
             )
             self.lbl_total.config(text=f"Total: {total}")
 
-            # Aktifkan tombol hanya jika pending
+            # Aktifkan tombol sesuai status
             if status == "pending":
                 self.btn_terima.config(state="normal")
                 self.btn_tolak.config(state="normal")
+                self.btn_hapus.config(state="disabled")
             else:
                 self.btn_terima.config(state="disabled")
                 self.btn_tolak.config(state="disabled")
+                self.btn_hapus.config(state="normal")
 
             # Detail items
             detail_rows = execute_query(
@@ -277,6 +293,7 @@ class KonfirmasiPanel(tk.Frame):
         self.lbl_total.config(text="Total: -")
         self.btn_terima.config(state="disabled")
         self.btn_tolak.config(state="disabled")
+        self.btn_hapus.config(state="disabled")
 
     # ── Aksi ──────────────────────────────────────────────────────────────────
     def _terima_pesanan(self):
@@ -288,7 +305,7 @@ class KonfirmasiPanel(tk.Frame):
             return
         try:
             conn   = get_connection()
-            cursor = conn.cursor(dictionary=True)
+            cursor = conn.cursor(pymysql.cursors.DictCursor)
 
             # Ambil detail pesanan
             cursor.execute(
@@ -351,6 +368,81 @@ class KonfirmasiPanel(tk.Frame):
             messagebox.showinfo("Info",
                                 f"❌ Pesanan #{self.selected_id} DITOLAK.",
                                 parent=self)
+            self._refresh()
+        except Exception as e:
+            messagebox.showerror("Error", str(e), parent=self)
+
+    def _hapus_pesanan(self):
+        """Hapus satu pesanan terpilih (hanya diterima/ditolak)."""
+        if not self.selected_id:
+            return
+        if not messagebox.askyesno(
+            "Hapus Pesanan",
+            f"Hapus histori pesanan #{self.selected_id} secara permanen?\n"
+            "Data detail pesanan juga akan ikut dihapus.",
+            parent=self
+        ):
+            return
+        try:
+            execute_query(
+                "DELETE FROM detail_pesanan WHERE id_pesanan=%s",
+                (self.selected_id,)
+            )
+            execute_query(
+                "DELETE FROM pesanan WHERE id_pesanan=%s",
+                (self.selected_id,)
+            )
+            messagebox.showinfo(
+                "Berhasil",
+                f"🗑  Pesanan #{self.selected_id} berhasil dihapus.",
+                parent=self
+            )
+            self._refresh()
+        except Exception as e:
+            messagebox.showerror("Error", str(e), parent=self)
+
+    def _hapus_semua_histori(self):
+        """Hapus semua pesanan berstatus diterima atau ditolak."""
+        try:
+            cek = execute_query(
+                "SELECT COUNT(*) AS c FROM pesanan WHERE status IN ('diterima','ditolak')",
+                fetch=True
+            )
+            jumlah = cek[0]["c"] if cek else 0
+        except Exception as e:
+            messagebox.showerror("Error", str(e), parent=self)
+            return
+
+        if jumlah == 0:
+            messagebox.showinfo(
+                "Info",
+                "Tidak ada histori yang bisa dihapus.\n(Pesanan pending tidak akan dihapus.)",
+                parent=self
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Hapus Semua Histori",
+            f"Akan menghapus {jumlah} pesanan (diterima & ditolak) secara permanen.\n"
+            "Pesanan berstatus PENDING tidak akan terpengaruh.\n\nLanjutkan?",
+            parent=self
+        ):
+            return
+
+        try:
+            execute_query(
+                "DELETE dp FROM detail_pesanan dp "
+                "JOIN pesanan p ON dp.id_pesanan = p.id_pesanan "
+                "WHERE p.status IN ('diterima','ditolak')"
+            )
+            execute_query(
+                "DELETE FROM pesanan WHERE status IN ('diterima','ditolak')"
+            )
+            messagebox.showinfo(
+                "Berhasil",
+                f"🗑  {jumlah} histori pesanan berhasil dihapus.",
+                parent=self
+            )
             self._refresh()
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
