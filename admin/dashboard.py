@@ -5,7 +5,7 @@ Aplikasi Business Center SMKN 13 Bandung
 
 import tkinter as tk
 from tkinter import messagebox
-from db import execute_query
+from db import get_db
 
 # ─── Palet Warna ─────────────────────────────────────────────────────────────
 PRIMARY    = "#CC0000"
@@ -212,17 +212,22 @@ class HomeDashboard(tk.Frame):
 
     def _get_stats(self) -> dict:
         try:
-            r_barang   = execute_query("SELECT COUNT(*) AS c FROM barang", fetch=True)
-            r_pending  = execute_query("SELECT COUNT(*) AS c FROM pesanan WHERE status='pending'", fetch=True)
-            r_diterima = execute_query("SELECT COUNT(*) AS c FROM pesanan WHERE status='diterima'", fetch=True)
-            r_ditolak  = execute_query("SELECT COUNT(*) AS c FROM pesanan WHERE status='ditolak'", fetch=True)
+            db = get_db()
+            # In Firestore, getting counts can be done with count() queries if supported,
+            # or by retrieving the snapshot length.
+            barang_len = len(db.collection('barang').get())
+            pending_len = len(db.collection('pesanan').where('status', '==', 'pending').get())
+            diterima_len = len(db.collection('pesanan').where('status', '==', 'diterima').get())
+            ditolak_len = len(db.collection('pesanan').where('status', '==', 'ditolak').get())
+            
             return {
-                "barang":   r_barang[0]["c"],
-                "pending":  r_pending[0]["c"],
-                "diterima": r_diterima[0]["c"],
-                "ditolak":  r_ditolak[0]["c"],
+                "barang":   barang_len,
+                "pending":  pending_len,
+                "diterima": diterima_len,
+                "ditolak":  ditolak_len,
             }
-        except Exception:
+        except Exception as e:
+            print(f"Error _get_stats: {e}")
             return {"barang": 0, "pending": 0, "diterima": 0, "ditolak": 0}
 
     def _build_recent_table(self, parent):
@@ -258,12 +263,13 @@ class HomeDashboard(tk.Frame):
         tv.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
         try:
-            rows = execute_query(
-                "SELECT id_pesanan, tanggal, total_harga, status FROM pesanan ORDER BY tanggal DESC LIMIT 10",
-                fetch=True
-            )
-            for r in rows:
-                total = f"Rp {r['total_harga']:,.0f}"
-                tv.insert("", "end", values=(r["id_pesanan"], r["tanggal"], total, r["status"].upper()))
-        except Exception:
-            pass
+            from firebase_admin import firestore
+            db = get_db()
+            docs = db.collection('pesanan').order_by('tanggal', direction=firestore.Query.DESCENDING).limit(10).stream()
+            
+            for doc in docs:
+                r = doc.to_dict()
+                total = f"Rp {r.get('total_harga', 0):,.0f}"
+                tv.insert("", "end", values=(doc.id[:8], r.get("tanggal", ""), total, r.get("status", "").upper()))
+        except Exception as e:
+            print(f"Error recent_table: {e}")

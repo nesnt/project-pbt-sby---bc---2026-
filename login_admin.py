@@ -6,7 +6,7 @@ Aplikasi Business Center SMKN 13 Bandung
 import tkinter as tk
 from tkinter import messagebox
 import hashlib
-from db import execute_query
+from db import get_db
 
 PRIMARY    = "#CC0000"
 PRIMARY_DK = "#A00000"
@@ -112,24 +112,30 @@ class LoginAdmin(tk.Toplevel):
             return
 
         try:
-            rows = execute_query(
-                "SELECT id_user, username, role FROM users WHERE username=%s AND password=%s",
-                (username, hash_password(password)),
-                fetch=True
-            )
+            db = get_db()
+            hashed_pw = hash_password(password)
+            
+            # Query Firestore
+            docs = db.collection('users')\
+                     .where('username', '==', username)\
+                     .where('password', '==', hashed_pw)\
+                     .limit(1).get()
+            
+            if docs:
+                admin_data = docs[0].to_dict()
+                admin_data['id_user'] = docs[0].id
+                
+                self.destroy()
+                from admin.dashboard import AdminDashboard
+                dash = AdminDashboard(self.master, admin_data)
+                dash.protocol("WM_DELETE_WINDOW", lambda: self._on_dashboard_close(dash))
+            else:
+                messagebox.showerror("Gagal Login", "Username atau password salah!", parent=self)
+                self.entry_pass.delete(0, "end")
+                
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
             return
-
-        if rows:
-            admin_data = rows[0]
-            self.destroy()
-            from admin.dashboard import AdminDashboard
-            dash = AdminDashboard(self.master, admin_data)
-            dash.protocol("WM_DELETE_WINDOW", lambda: self._on_dashboard_close(dash))
-        else:
-            messagebox.showerror("Gagal Login", "Username atau password salah!", parent=self)
-            self.entry_pass.delete(0, "end")
 
     def _on_dashboard_close(self, dash):
         dash.destroy()

@@ -5,8 +5,7 @@ Aplikasi Business Center SMKN 13 Bandung
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-import pymysql.cursors
-from db import execute_query, get_connection
+from db import get_db
 
 PRIMARY    = "#CC0000"
 PRIMARY_DK = "#A00000"
@@ -208,22 +207,20 @@ class KonfirmasiPanel(tk.Frame):
             self.tree.delete(item)
 
         try:
+            from firebase_admin import firestore
+            db = get_db()
             if self._filter_val == "semua":
-                rows = execute_query(
-                    "SELECT id_pesanan, tanggal, total_harga, status FROM pesanan ORDER BY tanggal DESC",
-                    fetch=True
-                )
+                docs = db.collection('pesanan').order_by('tanggal', direction=firestore.Query.DESCENDING).stream()
             else:
-                rows = execute_query(
-                    "SELECT id_pesanan, tanggal, total_harga, status FROM pesanan WHERE status=%s ORDER BY tanggal DESC",
-                    (self._filter_val,), fetch=True
-                )
-            for i, r in enumerate(rows):
-                total = f"Rp {r['total_harga']:,.0f}"
-                tag   = r["status"]
-                self.tree.insert("", "end", iid=str(r["id_pesanan"]),
-                                 values=(r["id_pesanan"], str(r["tanggal"])[:19],
-                                         total, r["status"].upper()),
+                docs = db.collection('pesanan').where('status', '==', self._filter_val).order_by('tanggal', direction=firestore.Query.DESCENDING).stream()
+                
+            for i, doc in enumerate(docs):
+                r = doc.to_dict()
+                total = f"Rp {r.get('total_harga', 0):,.0f}"
+                tag   = r.get("status", "")
+                self.tree.insert("", "end", iid=doc.id,
+                                 values=(doc.id[:8], str(r.get("tanggal", ""))[:19],
+                                         total, tag.upper()),
                                  tags=(tag, "alt" if i % 2 == 0 else ""))
 
             self.tree.tag_configure("pending",  foreground="#E65100")
@@ -237,23 +234,22 @@ class KonfirmasiPanel(tk.Frame):
         sel = self.tree.selection()
         if not sel:
             return
-        self.selected_id = int(sel[0])
+        self.selected_id = str(sel[0])
         self._load_detail(self.selected_id)
 
-    def _load_detail(self, id_pesanan: int):
+    def _load_detail(self, id_pesanan: str):
         self._clear_detail()
         try:
-            pesanan = execute_query(
-                "SELECT * FROM pesanan WHERE id_pesanan=%s", (id_pesanan,), fetch=True
-            )
-            if not pesanan:
+            db = get_db()
+            doc = db.collection('pesanan').document(id_pesanan).get()
+            if not doc.exists:
                 return
-            p = pesanan[0]
-            status = p["status"]
+            p = doc.to_dict()
+            status = p.get("status", "")
 
-            self.lbl_id.config(text=f"Pesanan #{p['id_pesanan']}")
-            tgl    = str(p["tanggal"])[:19]
-            total  = f"Rp {p['total_harga']:,.0f}"
+            self.lbl_id.config(text=f"Pesanan #{id_pesanan[:8]}")
+            tgl    = str(p.get("tanggal", ""))[:19]
+            total  = f"Rp {p.get('total_harga', 0):,.0f}"
             self.lbl_status.config(
                 text=f"📅 {tgl}   |   Status: {status.upper()}",
                 fg=STATUS_COLOR.get(status, GRAY_TEXT)
@@ -271,17 +267,11 @@ class KonfirmasiPanel(tk.Frame):
                 self.btn_hapus.config(state="normal")
 
             # Detail items
-            detail_rows = execute_query(
-                """SELECT dp.jumlah, dp.subtotal, b.nama_barang
-                   FROM detail_pesanan dp
-                   JOIN barang b ON dp.id_barang = b.id_barang
-                   WHERE dp.id_pesanan = %s""",
-                (id_pesanan,), fetch=True
-            )
+            detail_rows = p.get('detail_pesanan', [])
             for dr in detail_rows:
-                sub = f"Rp {dr['subtotal']:,.0f}"
+                sub = f"Rp {dr.get('subtotal', 0):,.0f}"
                 self.tree_detail.insert("", "end",
-                                        values=(dr["nama_barang"], dr["jumlah"], sub))
+                                        values=(dr.get("nama_barang", ""), dr.get("jumlah", 0), sub))
         except Exception as e:
             messagebox.showerror("Error DB", str(e))
 
@@ -304,49 +294,39 @@ class KonfirmasiPanel(tk.Frame):
                                     parent=self):
             return
         try:
-            conn   = get_connection()
-            cursor = conn.cursor(pymysql.cursors.DictCursor)
-
-            # Ambil detail pesanan
-            cursor.execute(
-                "SELECT id_barang, jumlah FROM detail_pesanan WHERE id_pesanan=%s",
-                (self.selected_id,)
-            )
-            details = cursor.fetchall()
+            from firebase_admin import firestore
+            db = get_db()
+            doc_ref = db.collection('pesanan').document(self.selected_id)
+            doc = doc_ref.get()
+            if not doc.exists: return
+            p = doc.to_dict()
+            details = p.get('detail_pesanan', [])
 
             # Cek stok cukup
             for d in details:
-                cursor.execute("SELECT nama_barang, stok FROM barang WHERE id_barang=%s", (d["id_barang"],))
-                barang = cursor.fetchone()
-                if barang["stok"] < d["jumlah"]:
+                b_doc = db.collection('barang').document(d["id_barang"]).get()
+                if not b_doc.exists: continue
+                b = b_doc.to_dict()
+                if b.get("stok", 0) < d["jumlah"]:
                     messagebox.showwarning(
                         "Stok Tidak Cukup",
-                        f"Stok \"{barang['nama_barang']}\" tidak cukup!\n"
-                        f"Tersedia: {barang['stok']}, Dibutuhkan: {d['jumlah']}",
+                        f"Stok \"{b.get('nama_barang', '')}\" tidak cukup!\n"
+                        f"Tersedia: {b.get('stok', 0)}, Dibutuhkan: {d['jumlah']}",
                         parent=self
                     )
-                    cursor.close()
-                    conn.close()
                     return
 
-            # Kurangi stok semua item
+            # Kurangi stok semua item dan update status
+            batch = db.batch()
             for d in details:
-                cursor.execute(
-                    "UPDATE barang SET stok = stok - %s WHERE id_barang=%s",
-                    (d["jumlah"], d["id_barang"])
-                )
+                b_ref = db.collection('barang').document(d["id_barang"])
+                batch.update(b_ref, {'stok': firestore.Increment(-d["jumlah"])})
 
-            # Update status pesanan
-            cursor.execute(
-                "UPDATE pesanan SET status='diterima' WHERE id_pesanan=%s",
-                (self.selected_id,)
-            )
-            conn.commit()
-            cursor.close()
-            conn.close()
+            batch.update(doc_ref, {'status': 'diterima'})
+            batch.commit()
 
             messagebox.showinfo("Berhasil",
-                                f"✅ Pesanan #{self.selected_id} DITERIMA!\nStok berhasil dikurangi.",
+                                f"✅ Pesanan #{self.selected_id[:8]} DITERIMA!\nStok berhasil dikurangi.",
                                 parent=self)
             self._refresh()
 
@@ -361,12 +341,10 @@ class KonfirmasiPanel(tk.Frame):
                                     parent=self):
             return
         try:
-            execute_query(
-                "UPDATE pesanan SET status='ditolak' WHERE id_pesanan=%s",
-                (self.selected_id,)
-            )
+            db = get_db()
+            db.collection('pesanan').document(self.selected_id).update({'status': 'ditolak'})
             messagebox.showinfo("Info",
-                                f"❌ Pesanan #{self.selected_id} DITOLAK.",
+                                f"❌ Pesanan #{self.selected_id[:8]} DITOLAK.",
                                 parent=self)
             self._refresh()
         except Exception as e:
@@ -378,23 +356,17 @@ class KonfirmasiPanel(tk.Frame):
             return
         if not messagebox.askyesno(
             "Hapus Pesanan",
-            f"Hapus histori pesanan #{self.selected_id} secara permanen?\n"
-            "Data detail pesanan juga akan ikut dihapus.",
+            f"Hapus histori pesanan #{self.selected_id[:8]} secara permanen?",
             parent=self
         ):
             return
         try:
-            execute_query(
-                "DELETE FROM detail_pesanan WHERE id_pesanan=%s",
-                (self.selected_id,)
-            )
-            execute_query(
-                "DELETE FROM pesanan WHERE id_pesanan=%s",
-                (self.selected_id,)
-            )
+            db = get_db()
+            db.collection('pesanan').document(self.selected_id).delete()
+            
             messagebox.showinfo(
                 "Berhasil",
-                f"🗑  Pesanan #{self.selected_id} berhasil dihapus.",
+                f"🗑  Pesanan #{self.selected_id[:8]} berhasil dihapus.",
                 parent=self
             )
             self._refresh()
@@ -404,11 +376,12 @@ class KonfirmasiPanel(tk.Frame):
     def _hapus_semua_histori(self):
         """Hapus semua pesanan berstatus diterima atau ditolak."""
         try:
-            cek = execute_query(
-                "SELECT COUNT(*) AS c FROM pesanan WHERE status IN ('diterima','ditolak')",
-                fetch=True
-            )
-            jumlah = cek[0]["c"] if cek else 0
+            db = get_db()
+            # Firestore tidak support query IN dengan stream secara langsung untuk delete massal yang efisien tanpa loop,
+            # tapi kita bisa ambil ID-nya dulu.
+            docs = db.collection('pesanan').where('status', 'in', ['diterima', 'ditolak']).stream()
+            doc_ids = [d.id for d in docs]
+            jumlah = len(doc_ids)
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
             return
@@ -430,14 +403,11 @@ class KonfirmasiPanel(tk.Frame):
             return
 
         try:
-            execute_query(
-                "DELETE dp FROM detail_pesanan dp "
-                "JOIN pesanan p ON dp.id_pesanan = p.id_pesanan "
-                "WHERE p.status IN ('diterima','ditolak')"
-            )
-            execute_query(
-                "DELETE FROM pesanan WHERE status IN ('diterima','ditolak')"
-            )
+            batch = db.batch()
+            for did in doc_ids:
+                batch.delete(db.collection('pesanan').document(did))
+            batch.commit()
+
             messagebox.showinfo(
                 "Berhasil",
                 f"🗑  {jumlah} histori pesanan berhasil dihapus.",

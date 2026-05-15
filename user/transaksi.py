@@ -7,8 +7,12 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from PIL import Image, ImageTk, ImageDraw
 import os
+import requests
+from io import BytesIO
 
-from db import execute_query, get_connection, IMAGES_DIR
+from db import get_db, get_drive_service, DRIVE_FOLDER_ID, IMAGES_DIR, API_URL
+
+API_BASE_URL = API_URL
 
 PRIMARY    = "#CC0000"
 PRIMARY_DK = "#A00000"
@@ -26,33 +30,92 @@ CARD_IMG_SIZE = (90, 90)
 
 
 def _load_card_image(foto: str, stok: int):
-    """Buat PhotoImage dari nama file foto. Return None jika tidak ada."""
+    """Muat gambar produk dari local atau API. Return None jika tidak ada."""
+    if not foto: return None
     try:
-        path = os.path.join(IMAGES_DIR, foto) if foto else None
-        if path and os.path.isfile(path):
-            img = Image.open(path).convert("RGBA")
-            img.thumbnail(CARD_IMG_SIZE, Image.LANCZOS)
-        else:
-            if stok > 0:
-                return None
-            img = Image.new("RGBA", CARD_IMG_SIZE, (255, 255, 255, 0))
+        # Nama file cache yang bersih
+        clean_name = "".join([c for c in str(foto) if c.isalnum() or c in "._- "])
+        local_filename = f"{clean_name}.png" if not clean_name.endswith(".png") else clean_name
+        local_path = os.path.join(IMAGES_DIR, local_filename)
 
-        canvas = Image.new("RGBA", CARD_IMG_SIZE, (255, 255, 255, 0))
-        offset = ((CARD_IMG_SIZE[0] - img.width)  // 2,
-                  (CARD_IMG_SIZE[1] - img.height) // 2)
-        canvas.paste(img, offset, img)
+        # 1. Coba dari lokal dulu
+        if os.path.isfile(local_path):
+            try:
+                with Image.open(local_path) as img:
+                    img_ready = img.convert("RGBA")
+                    return _process_card_image(img_ready, stok)
+            except:
+                pass
+        
+        # 2. Jika tidak ada di lokal, coba dari Google Drive
+        try:
+            service = get_drive_service()
+            if not service: return None
 
+            # Cari file ID berdasarkan nama di folder yang ditentukan
+            query = f"name = '{foto}' and '{DRIVE_FOLDER_ID}' in parents and trashed = false"
+            results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+            items = results.get('files', [])
+            
+            if not items:
+                # Jika tidak ketemu dengan nama, cek apakah 'foto' mungkin sebuah ID
+                if "." in str(foto) or len(str(foto)) < 20:
+                    pass # Bukan ID
+                else:
+                    file_id = foto
+                    # Download media
+                    request = service.files().get_media(fileId=file_id)
+                    img_data = request.execute()
+                    with Image.open(BytesIO(img_data)) as img:
+                        img_ready = img.convert("RGBA")
+                        try:
+                            img_ready.save(local_path)
+                        except: pass
+                        return _process_card_image(img_ready, stok)
+            else:
+                file_id = items[0]['id']
+                # Download media
+                request = service.files().get_media(fileId=file_id)
+                img_data = request.execute()
+                with Image.open(BytesIO(img_data)) as img:
+                    img_ready = img.convert("RGBA")
+                    try:
+                        img_ready.save(local_path)
+                    except: pass
+                    return _process_card_image(img_ready, stok)
+
+        except Exception as e:
+            print(f"Error fetching image from GDrive: {e}")
+        
+        # 3. Default jika gagal download (stok habis)
         if stok <= 0:
-            draw = ImageDraw.Draw(canvas)
-            line_width = 8
-            w, h = CARD_IMG_SIZE
-            color = (204, 0, 0, 200) # PRIMARY (red) dengan alpha
-            draw.line((15, 15, w-15, h-15), fill=color, width=line_width)
-            draw.line((15, h-15, w-15, 15), fill=color, width=line_width)
-
-        return ImageTk.PhotoImage(canvas)
+            with Image.new("RGBA", CARD_IMG_SIZE, (255, 255, 255, 0)) as img:
+                return _process_card_image(img, stok)
+            
+        return None
     except Exception:
         return None
+
+def _process_card_image(img, stok):
+    """Helper untuk memproses resize dan canvas."""
+    # Buat copy agar tidak memodifikasi original jika diperlukan
+    img_thumb = img.copy()
+    img_thumb.thumbnail(CARD_IMG_SIZE, Image.LANCZOS)
+    
+    canvas = Image.new("RGBA", CARD_IMG_SIZE, (255, 255, 255, 0))
+    offset = ((CARD_IMG_SIZE[0] - img_thumb.width)  // 2,
+                (CARD_IMG_SIZE[1] - img_thumb.height) // 2)
+    canvas.paste(img_thumb, offset, img_thumb)
+
+    if stok <= 0:
+        draw = ImageDraw.Draw(canvas)
+        line_width = 8
+        w, h = CARD_IMG_SIZE
+        color = (204, 0, 0, 200) # PRIMARY (red) dengan alpha
+        draw.line((15, 15, w-15, h-15), fill=color, width=line_width)
+        draw.line((15, h-15, w-15, 15), fill=color, width=line_width)
+
+    return ImageTk.PhotoImage(canvas)
 
 
 class TransaksiWindow(tk.Toplevel):
@@ -212,10 +275,14 @@ class TransaksiWindow(tk.Toplevel):
     # ── Katalog ───────────────────────────────────────────────────────────────
     def _load_barang(self):
         try:
-            self.barang_data = execute_query(
-                "SELECT id_barang, nama_barang, harga_barang, stok, foto FROM barang ORDER BY nama_barang",
-                fetch=True
-            )
+            db = get_db()
+            docs = db.collection('barang').stream()
+            self.barang_data = []
+            for doc in docs:
+                b = doc.to_dict()
+                b["id_barang"] = doc.id
+                self.barang_data.append(b)
+            self.barang_data.sort(key=lambda x: x.get("nama_barang", "").lower())
         except Exception as e:
             messagebox.showerror("Error DB", str(e))
             self.barang_data = []
@@ -233,9 +300,13 @@ class TransaksiWindow(tk.Toplevel):
 
         COLS = 3
         for idx, item in enumerate(data):
-            r, c = divmod(idx, COLS)
-            self._make_card(item, r, c)
-            self.cat_frame.grid_columnconfigure(c, weight=1)
+            try:
+                r, c = divmod(idx, COLS)
+                self._make_card(item, r, c)
+                self.cat_frame.grid_columnconfigure(c, weight=1)
+            except Exception as e:
+                print(f"Error rendering item {item.get('id_barang')}: {e}")
+                continue
 
         if not data:
             tk.Label(self.cat_frame, text="Tidak ada barang.",
@@ -245,7 +316,10 @@ class TransaksiWindow(tk.Toplevel):
     def _make_card(self, item, row, col):
         id_b  = item["id_barang"]
         nama  = item["nama_barang"]
-        harga = float(item["harga_barang"])
+        try:
+            harga = float(item["harga_barang"] or 0)
+        except (ValueError, TypeError):
+            harga = 0
         stok  = item["stok"]
         foto  = item.get("foto")
 
@@ -294,31 +368,32 @@ class TransaksiWindow(tk.Toplevel):
     def _tambah_ke_keranjang(self, item):
         id_b = item["id_barang"]
         try:
-            cur = execute_query("SELECT stok FROM barang WHERE id_barang=%s", (id_b,), fetch=True)
-            stok_db = cur[0]["stok"] if cur else 0
+            db = get_db()
+            doc = db.collection('barang').document(id_b).get()
+            stok_db = doc.to_dict().get("stok", 0) if doc.exists else 0
         except Exception:
-            stok_db = item["stok"]
+            stok_db = item.get("stok", 0)
 
         if id_b in self.keranjang:
             if self.keranjang[id_b]["jumlah"] >= stok_db:
-                self._notif(f"Stok \"{item['nama_barang']}\" tidak mencukupi!", error=True)
+                self._notif(f"Stok \"{item.get('nama_barang', '')}\" tidak mencukupi!", error=True)
                 return
             self.keranjang[id_b]["jumlah"] += 1
         else:
-            if stok_db == 0:
+            if stok_db <= 0:
                 self._notif("Stok habis!", error=True)
                 return
             self.keranjang[id_b] = {
-                "nama": item["nama_barang"], "harga": float(item["harga_barang"]),
+                "nama": item.get("nama_barang", ""), "harga": float(item.get("harga_barang", 0)),
                 "jumlah": 1, "stok": stok_db
             }
         self._update_cart_ui()
-        self._notif(f"\"{item['nama_barang']}\" ditambahkan.")
+        self._notif(f"\"{item.get('nama_barang', '')}\" ditambahkan.")
 
     def _hapus_item(self):
         sel = self.cart_tree.selection()
         if sel:
-            del self.keranjang[int(sel[0])]
+            del self.keranjang[str(sel[0])]
             self._update_cart_ui()
 
     def _kosongkan(self):
@@ -356,18 +431,28 @@ class TransaksiWindow(tk.Toplevel):
                                     parent=self):
             return
         try:
-            conn   = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO pesanan (total_harga, status) VALUES (%s, 'pending')", (total,))
-            id_pesanan = cursor.lastrowid
+            import datetime
+            db = get_db()
+            doc_ref = db.collection('pesanan').document()
+            
+            details = []
             for id_b, d in self.keranjang.items():
-                cursor.execute(
-                    "INSERT INTO detail_pesanan (id_pesanan, id_barang, jumlah, subtotal) VALUES (%s,%s,%s,%s)",
-                    (id_pesanan, id_b, d["jumlah"], d["harga"]*d["jumlah"])
-                )
-            conn.commit()
-            cursor.close()
-            conn.close()
+                details.append({
+                    "id_barang": id_b,
+                    "nama_barang": d["nama"],
+                    "jumlah": d["jumlah"],
+                    "subtotal": d["harga"] * d["jumlah"]
+                })
+            
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            doc_ref.set({
+                "tanggal": now_str,
+                "total_harga": total,
+                "status": "pending",
+                "detail_pesanan": details
+            })
+            
+            id_pesanan = doc_ref.id[:8]
             self._show_sukses(id_pesanan, total)
             self.keranjang.clear()
             self._update_cart_ui()

@@ -8,8 +8,14 @@ from tkinter import ttk, messagebox, filedialog
 from PIL import Image, ImageTk
 import os
 import shutil
+import threading
+import time
+import requests
+from io import BytesIO
 
-from db import execute_query, IMAGES_DIR
+from db import get_db, get_drive_service, DRIVE_FOLDER_ID, IMAGES_DIR, API_URL
+
+API_BASE_URL = API_URL
 
 PRIMARY    = "#CC0000"
 PRIMARY_DK = "#A00000"
@@ -54,17 +60,57 @@ def _on_harga_keyrelease(entry: tk.Entry, preview_lbl: tk.Label):
 
 
 def load_thumbnail(foto: str, size=(50, 50)):
-    """Muat gambar produk sebagai PhotoImage. Return None jika tidak ada."""
-    if not foto:
-        return None
-    path = os.path.join(IMAGES_DIR, foto)
-    if not os.path.isfile(path):
-        return None
+    if not foto: return None
     try:
-        img = Image.open(path).convert("RGBA")
-        img.thumbnail(size, Image.LANCZOS)
-        return ImageTk.PhotoImage(img)
-    except Exception:
+        # Coba lokal dulu untuk cache
+        # Pastikan kita konsisten dengan penamaan cache
+        clean_name = "".join([c for c in str(foto) if c.isalnum() or c in "._- "])
+        local_path = os.path.join(IMAGES_DIR, f"{clean_name}.png")
+        
+        if os.path.exists(local_path):
+            try:
+                with Image.open(local_path) as img:
+                    img_thumb = img.convert("RGBA")
+                    img_thumb.thumbnail(size, Image.LANCZOS)
+                    return ImageTk.PhotoImage(img_thumb)
+            except:
+                pass # Jika file cache korup, lanjut download
+
+        # Ambil dari Google Drive
+        service = get_drive_service()
+        if not service: return None
+        
+        # Cari file ID berdasarkan nama di folder yang ditentukan
+        query = f"name = '{foto}' and '{DRIVE_FOLDER_ID}' in parents and trashed = false"
+        results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+        items = results.get('files', [])
+        
+        if not items:
+            # Jika tidak ketemu dengan nama, cek apakah 'foto' mungkin sebuah ID
+            # GDrive ID biasanya alphanumeric tanpa titik dan panjang (misal 33 char)
+            if "." in str(foto) or len(str(foto)) < 20:
+                # Ini kemungkinan nama file yang tidak ditemukan
+                return None
+            file_id = foto
+        else:
+            file_id = items[0]['id']
+
+        # Download media menggunakan file_id yang ditemukan
+        try:
+            request = service.files().get_media(fileId=file_id)
+            img_data = request.execute()
+            with Image.open(BytesIO(img_data)) as img:
+                img_conv = img.convert("RGBA")
+                # Simpan ke lokal sebagai cache
+                img_conv.save(local_path)
+                img_conv.thumbnail(size, Image.LANCZOS)
+                return ImageTk.PhotoImage(img_conv)
+        except Exception as e:
+            # Sering terjadi jika fileId 404 atau invalid
+            return None
+            
+    except Exception as e:
+        print(f"Error loading thumbnail from GDrive: {e}")
         return None
 
 
@@ -87,10 +133,6 @@ class BarangPanel(tk.Frame):
         tk.Button(hdr, text="+ Tambah Barang", font=("Segoe UI", 10, "bold"),
                   bg=ACCENT_G, fg=WHITE, relief="flat", padx=14, pady=6, cursor="hand2",
                   command=self._open_form_tambah).pack(side="right", padx=20, pady=12)
-                  
-        tk.Button(hdr, text="Update Cepat", font=("Segoe UI", 10, "bold"),
-                  bg="#FF8F00", fg=WHITE, relief="flat", padx=14, pady=6, cursor="hand2",
-                  command=self._open_form_update_cepat).pack(side="right", pady=12)
 
         # ── Search bar ────────────────────────────────────────────────────────
         sb = tk.Frame(self, bg=LIGHT_GRAY)
@@ -138,6 +180,15 @@ class BarangPanel(tk.Frame):
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
+        # ── Context Menu ──────────────────────────────────────────────────────
+        self.menu_context = tk.Menu(self, tearoff=0, font=("Segoe UI", 10))
+        self.menu_context.add_command(label="✏️ Edit Barang", command=self._open_form_edit)
+        self.menu_context.add_command(label="⚡ Update Cepat (Stok/Foto)", command=self._open_form_update_cepat)
+        self.menu_context.add_separator()
+        self.menu_context.add_command(label="🗑️ Hapus Barang", command=self._hapus, foreground=PRIMARY)
+        
+        self.tree.bind("<Button-3>", self._on_right_click)
+
         # ── Action bar bawah ──────────────────────────────────────────────────
         act = tk.Frame(self, bg=WHITE)
         act.pack(fill="x", padx=20, pady=(0, 10))
@@ -164,10 +215,13 @@ class BarangPanel(tk.Frame):
     def _load_data(self):
         self.all_data = []
         try:
-            self.all_data = execute_query(
-                "SELECT id_barang, nama_barang, harga_barang, stok, foto FROM barang ORDER BY id_barang",
-                fetch=True
-            )
+            db = get_db()
+            docs = db.collection('barang').stream()
+            for doc in docs:
+                r = doc.to_dict()
+                r["id_barang"] = doc.id
+                self.all_data.append(r)
+            self.all_data.sort(key=lambda x: x.get("nama_barang", "").lower())
         except Exception as e:
             messagebox.showerror("Error DB", str(e))
         self._render_table(self.all_data)
@@ -204,7 +258,7 @@ class BarangPanel(tk.Frame):
     def _on_select(self, _):
         sel = self.tree.selection()
         if sel:
-            self.selected_id = int(sel[0])
+            self.selected_id = str(sel[0])
             self.btn_edit.config(state="normal")
             self.btn_hapus.config(state="normal")
             nama = self.tree.item(sel[0])["values"][0]
@@ -215,6 +269,14 @@ class BarangPanel(tk.Frame):
             self.btn_hapus.config(state="disabled")
             self.lbl_info.config(text="Pilih baris untuk edit/hapus")
 
+    def _on_right_click(self, event):
+        """Tampilkan menu klik kanan pada item yang ditunjuk."""
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid)
+            self._on_select(None)
+            self.menu_context.post(event.x_root, event.y_root)
+
     # ── CRUD ──────────────────────────────────────────────────────────────────
     def _open_form_tambah(self):
         BarangForm(self, mode="tambah")
@@ -223,28 +285,66 @@ class BarangPanel(tk.Frame):
         if not self.selected_id:
             return
         try:
-            rows = execute_query("SELECT * FROM barang WHERE id_barang=%s",
-                                 (self.selected_id,), fetch=True)
-            if rows:
-                BarangForm(self, mode="edit", data=rows[0])
+            db = get_db()
+            doc = db.collection('barang').document(self.selected_id).get()
+            if doc.exists:
+                data = doc.to_dict()
+                data["id_barang"] = doc.id
+                BarangForm(self, mode="edit", data=data)
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
     def _open_form_update_cepat(self):
-        UpdateCepatForm(self)
+        UpdateCepatForm(self, id_barang=self.selected_id)
 
     def _hapus(self):
         if not self.selected_id:
             return
-        nama = self.tree.item(str(self.selected_id))["values"][0]
-        if messagebox.askyesno("Hapus Barang", f"Yakin hapus barang:\n\"{nama}\"?", icon="warning"):
-            try:
-                execute_query("DELETE FROM barang WHERE id_barang=%s", (self.selected_id,))
-                messagebox.showinfo("Berhasil", "Barang berhasil dihapus.")
+        
+        try:
+            db = get_db()
+            doc = db.collection('barang').document(self.selected_id).get()
+            if not doc.exists:
+                messagebox.showwarning("Peringatan", "Data barang sudah tidak ada.")
+                self.refresh()
+                return
+            
+            data = doc.to_dict()
+            nama = data.get("nama_barang", "Barang")
+            foto_id = data.get("foto")
+
+            if messagebox.askyesno("Hapus Barang", f"Yakin hapus barang:\n\"{nama}\"?\n\nData dan foto di Drive akan dihapus permanen.", icon="warning"):
+                # 1. Hapus dari Firestore
+                db.collection('barang').document(self.selected_id).delete()
+                
+                # 2. Hapus dari Google Drive (Jika ada ID foto)
+                # Pastikan foto_id adalah ID GDrive (bukan nama file lama)
+                if foto_id and "." not in str(foto_id) and len(str(foto_id)) >= 20:
+                    def delete_drive_file(fid):
+                        try:
+                            service = get_drive_service()
+                            if service:
+                                service.files().delete(fileId=fid).execute()
+                        except Exception as e:
+                            print(f"Gagal hapus file di Drive: {e}")
+
+                    # Jalankan di thread agar tidak membekukan UI
+                    threading.Thread(target=delete_drive_file, args=(foto_id,), daemon=True).start()
+                
+                # 3. Hapus cache lokal
+                if foto_id:
+                    clean_name = "".join([c for c in str(foto_id) if c.isalnum() or c in "._- "])
+                    local_path = os.path.join(IMAGES_DIR, f"{clean_name}.png")
+                    if os.path.exists(local_path):
+                        try: os.remove(local_path)
+                        except: pass
+
+                messagebox.showinfo("Berhasil", f"Barang \"{nama}\" berhasil dihapus.")
                 self.selected_id = None
-                self._load_data()
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
+                self.refresh()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Terjadi kesalahan saat menghapus: {e}")
 
     def refresh(self):
         self.selected_id = None
@@ -386,9 +486,10 @@ class BarangForm(tk.Toplevel):
         tk.Button(btn_row, text="Batal", font=("Segoe UI", 10),
                   bg=LIGHT_GRAY, fg=DARK_TEXT, relief="flat", padx=14, pady=7,
                   cursor="hand2", command=self.destroy).pack(side="left")
-        tk.Button(btn_row, text="Simpan", font=("Segoe UI", 10, "bold"),
+        self.btn_simpan = tk.Button(btn_row, text="Simpan", font=("Segoe UI", 10, "bold"),
                   bg=ACCENT_G, fg=WHITE, relief="flat", padx=14, pady=7,
-                  cursor="hand2", command=self._simpan).pack(side="right")
+                  cursor="hand2", command=self._simpan)
+        self.btn_simpan.pack(side="right")
 
         self.entries["nama"].focus()
         self.bind("<Return>", lambda e: self._simpan())
@@ -432,28 +533,61 @@ class BarangForm(tk.Toplevel):
         self.lbl_preview.config(image="", text="Belum ada\nfoto")
         self.lbl_foto_nama.config(text="Format: JPG, PNG, WEBP")
 
-    def _salin_foto_ke_images(self) -> str | None:
-        """Salin foto yang dipilih ke folder images/, return nama file."""
+    def _salin_foto_ke_images(self, custom_id: str = None) -> str | None:
+        """Upload foto ke Google Drive, return File ID. Nama file menggunakan custom_id."""
         if not self._foto_path or not os.path.isfile(self._foto_path):
-            return self._foto_nama  # kembalikan nama lama jika tidak ada pilihan baru
-
-        ext  = os.path.splitext(self._foto_path)[1].lower()
-        # Buat nama unik berdasarkan nama barang
-        nama_barang = self.entries["nama"].get().strip().replace(" ", "_").lower()
-        import time
-        nama_file   = f"{nama_barang}_{int(time.time())}{ext}"
-        dest        = os.path.join(IMAGES_DIR, nama_file)
+            return self._foto_nama
 
         try:
-            # Resize & simpan agar ukuran file kecil
-            img = Image.open(self._foto_path).convert("RGB")
-            img.thumbnail((600, 600), Image.LANCZOS)
-            img.save(dest, quality=85)
-            return nama_file
-        except Exception:
-            # Fallback: copy biasa jika gagal proses
-            shutil.copy2(self._foto_path, dest)
-            return nama_file
+            service = get_drive_service()
+            if not service:
+                raise Exception("Drive service not initialized")
+
+            # Resize dulu secara lokal agar upload ringan
+            # Gunakan unique temp filename untuk menghindari WinError 32
+            ext = os.path.splitext(self._foto_path)[1].lower() or ".jpg"
+            temp_name = f"temp_upd_{int(time.time()*1000)}{ext}"
+            temp_path = os.path.join(IMAGES_DIR, temp_name)
+            
+            with Image.open(self._foto_path) as img:
+                img_proc = img.convert("RGB")
+                img_proc.thumbnail((800, 800), Image.LANCZOS)
+                img_proc.save(temp_path, quality=85)
+            
+            # Gunakan custom_id jika ada, jika tidak gunakan timestamp
+            nama_file = f"{custom_id or int(time.time())}{ext}"
+            
+            # Metadata untuk GDrive
+            file_metadata = {
+                'name': nama_file,
+                'parents': [DRIVE_FOLDER_ID]
+            }
+            
+            from googleapiclient.http import MediaFileUpload
+            media = MediaFileUpload(temp_path, mimetype='image/jpeg', resumable=True)
+            
+            # Upload
+            file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+            gdrive_id = file.get('id')
+            
+            # Hapus file sementara dengan pengamanan
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except:
+                pass # Abaikan jika masih terkunci, akan dibersihkan nanti
+            
+            # Simpan juga ke folder images lokal sebagai cache
+            final_local_path = os.path.join(IMAGES_DIR, f"{gdrive_id}.png")
+            with Image.open(self._foto_path) as img:
+                img_cache = img.convert("RGBA")
+                img_cache.save(final_local_path)
+                
+            return gdrive_id
+        except Exception as e:
+            print(f"Error upload Google Drive: {e}")
+            return self._foto_nama
+
 
     # ── Simpan ────────────────────────────────────────────────────────────────
     def _simpan(self):
@@ -476,32 +610,60 @@ class BarangForm(tk.Toplevel):
             messagebox.showwarning("Validasi", "Harga dan stok harus angka positif!", parent=self)
             return
 
-        # Salin foto
-        foto_file = self._salin_foto_ke_images()
+        # Disable button agar tidak double klik
+        self.btn_simpan.config(state="disabled", text="Proses...")
+        
+        def worker():
+            try:
+                db = get_db()
+                
+                if self.mode == "tambah":
+                    # Generate ID dulu agar bisa dipakai buat nama file di GDrive
+                    doc_ref = db.collection('barang').document()
+                    product_id = doc_ref.id
+                    
+                    # Salin foto dengan penamaan ID
+                    foto_file = self._salin_foto_ke_images(custom_id=product_id)
+                    
+                    doc_ref.set({
+                        "nama_barang": nama,
+                        "harga_barang": harga_val,
+                        "stok": stok_val,
+                        "foto": foto_file
+                    })
+                    self.after(0, lambda: self._on_success("Barang berhasil ditambahkan!"))
+                else:
+                    product_id = self.data["id_barang"]
+                    # Salin foto dengan penamaan ID
+                    foto_file = self._salin_foto_ke_images(custom_id=product_id)
+                    
+                    db.collection('barang').document(product_id).update({
+                        "nama_barang": nama,
+                        "harga_barang": harga_val,
+                        "stok": stok_val,
+                        "foto": foto_file
+                    })
+                    self.after(0, lambda: self._on_success("Barang berhasil diperbarui!"))
+            except Exception as e:
+                self.after(0, lambda ex=e: self._on_error(ex))
 
-        try:
-            if self.mode == "tambah":
-                execute_query(
-                    "INSERT INTO barang (nama_barang, harga_barang, stok, foto) VALUES (%s,%s,%s,%s)",
-                    (nama, harga_val, stok_val, foto_file)
-                )
-                messagebox.showinfo("Berhasil", "Barang berhasil ditambahkan!", parent=self)
-            else:
-                execute_query(
-                    "UPDATE barang SET nama_barang=%s, harga_barang=%s, stok=%s, foto=%s WHERE id_barang=%s",
-                    (nama, harga_val, stok_val, foto_file, self.data["id_barang"])
-                )
-                messagebox.showinfo("Berhasil", "Barang berhasil diperbarui!", parent=self)
+        threading.Thread(target=worker, daemon=True).start()
 
-            self.panel.refresh()
-            self.destroy()
-        except Exception as e:
-            messagebox.showerror("Error DB", str(e), parent=self)
+    def _on_success(self, msg):
+        messagebox.showinfo("Berhasil", msg, parent=self)
+        self.panel.refresh()
+        self.destroy()
+
+    def _on_error(self, err):
+        messagebox.showerror("Error DB", str(err), parent=self)
+        # Re-enable button
+        self.btn_simpan.config(state="normal", text="Simpan")
 
 class UpdateCepatForm(tk.Toplevel):
-    def __init__(self, panel: BarangPanel):
+    def __init__(self, panel: BarangPanel, id_barang: str = None):
         super().__init__(panel)
         self.panel = panel
+        self.target_id = id_barang
         self.all_barang = []
         self._foto_path = None
         self._foto_nama = None
@@ -513,9 +675,23 @@ class UpdateCepatForm(tk.Toplevel):
         self.configure(bg=WHITE)
         self.transient(panel)
         self._center(450, 520)
-        self._load_barang()
+        
+        # Gunakan data yang sudah ada di panel agar tidak membekukan UI (stream DB lambat)
+        self.all_barang = list(self.panel.all_data)
+        
         self._build()
+        
+        if self.target_id:
+            self._preselect_target()
+            
         self.grab_set()
+
+    def _preselect_target(self):
+        for i, b in enumerate(self.all_barang):
+            if b["id_barang"] == self.target_id:
+                self.combo.current(i)
+                self._on_select_barang(None)
+                break
 
     def _center(self, w, h):
         self.update_idletasks()
@@ -524,10 +700,8 @@ class UpdateCepatForm(tk.Toplevel):
         self.geometry(f"{w}x{h}+{x}+{y}")
 
     def _load_barang(self):
-        try:
-            self.all_barang = execute_query("SELECT id_barang, nama_barang, foto FROM barang ORDER BY nama_barang", fetch=True)
-        except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self)
+        """Metode ini sudah tidak dipanggil di __init__ karena lambat."""
+        pass
 
     def _build(self):
         hdr = tk.Frame(self, bg="#FF8F00", height=50)
@@ -572,7 +746,8 @@ class UpdateCepatForm(tk.Toplevel):
         btn_row = tk.Frame(body, bg=WHITE)
         btn_row.pack(fill="x", pady=(10, 0))
         tk.Button(btn_row, text="Batal", font=("Segoe UI", 10), bg=LIGHT_GRAY, fg=DARK_TEXT, relief="flat", padx=14, pady=7, cursor="hand2", command=self.destroy).pack(side="left")
-        tk.Button(btn_row, text="Simpan Update", font=("Segoe UI", 10, "bold"), bg=ACCENT_G, fg=WHITE, relief="flat", padx=14, pady=7, cursor="hand2", command=self._simpan).pack(side="right")
+        self.btn_simpan = tk.Button(btn_row, text="Simpan Update", font=("Segoe UI", 10, "bold"), bg=ACCENT_G, fg=WHITE, relief="flat", padx=14, pady=7, cursor="hand2", command=self._simpan)
+        self.btn_simpan.pack(side="right")
 
     def _on_select_barang(self, _):
         idx = self.combo.current()
@@ -581,7 +756,13 @@ class UpdateCepatForm(tk.Toplevel):
             self._foto_nama = b.get("foto")
             self._foto_path = None
             if self._foto_nama:
-                self._show_preview_from_file(os.path.join(IMAGES_DIR, self._foto_nama))
+                # Coba lokal dulu
+                local_p = os.path.join(IMAGES_DIR, f"{self._foto_nama}.png")
+                if os.path.exists(local_p):
+                    self._show_preview_from_file(local_p)
+                else:
+                    # Jika tidak ada, coba dari API secara async
+                    self._show_preview_from_file(f"{API_BASE_URL}/images/{self._foto_nama}")
             else:
                 self.lbl_preview.config(image="", text="Belum ada\nfoto")
                 self.lbl_foto_nama.config(text="Tidak ada foto.")
@@ -595,16 +776,27 @@ class UpdateCepatForm(tk.Toplevel):
         self._show_preview_from_file(path)
 
     def _show_preview_from_file(self, path: str):
-        if not os.path.isfile(path): return
-        try:
-            img = Image.open(path).convert("RGBA")
-            img.thumbnail((96, 96), Image.LANCZOS)
-            photo = ImageTk.PhotoImage(img)
-            self._img_ref = photo
-            self.lbl_preview.config(image=photo, text="")
-            self.lbl_preview.image = photo
-        except Exception as e:
-            self.lbl_foto_nama.config(text=f"Error: {e}")
+        def _task():
+            try:
+                if path.startswith("http"):
+                    res = requests.get(path, stream=True, timeout=5)
+                    img = Image.open(res.raw).convert("RGBA")
+                else:
+                    if not os.path.isfile(path): return
+                    img = Image.open(path).convert("RGBA")
+                
+                img.thumbnail((96, 96), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self.after(0, lambda: self._update_preview_ui(photo))
+            except Exception as e:
+                print(f"Preview error: {e}")
+        
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _update_preview_ui(self, photo):
+        self._img_ref = photo
+        self.lbl_preview.config(image=photo, text="")
+        self.lbl_preview.image = photo
 
     def _simpan(self):
         idx = self.combo.current()
@@ -623,34 +815,63 @@ class UpdateCepatForm(tk.Toplevel):
                 return
             stok_val = int(tambah_stok)
 
-        new_foto = b.get("foto")
-        if self._foto_path and os.path.isfile(self._foto_path):
-            import time
-            ext = os.path.splitext(self._foto_path)[1].lower()
-            nama_file = f"update_{id_b}_{int(time.time())}{ext}"
-            dest = os.path.join(IMAGES_DIR, nama_file)
-            try:
-                img = Image.open(self._foto_path).convert("RGB")
-                img.thumbnail((600, 600), Image.LANCZOS)
-                img.save(dest, quality=85)
-                new_foto = nama_file
-            except Exception:
-                shutil.copy2(self._foto_path, dest)
-                new_foto = nama_file
+        # Disable button
+        self.btn_simpan.config(state="disabled", text="Updating...")
 
-        try:
-            query = "UPDATE barang SET foto=%s"
-            params = [new_foto]
-            if stok_val > 0:
-                query += ", stok = stok + %s"
-                params.append(stok_val)
+        def worker():
+            try:
+                new_foto = b.get("foto")
+                if self._foto_path and os.path.isfile(self._foto_path):
+                    service = get_drive_service()
+                    if not service: raise Exception("Drive service error")
+
+                    ext = os.path.splitext(self._foto_path)[1].lower() or ".jpg"
+                    nama_file = f"update_{id_b}_{int(time.time())}{ext}"
+                    
+                    temp_name = f"temp_upd_fast_{int(time.time()*1000)}{ext}"
+                    temp_path = os.path.join(IMAGES_DIR, temp_name)
+                    with Image.open(self._foto_path) as img:
+                        img_proc = img.convert("RGB")
+                        img_proc.thumbnail((800, 800), Image.LANCZOS)
+                        img_proc.save(temp_path, quality=85)
+                    
+                    # Upload ke Google Drive
+                    file_metadata = {'name': nama_file, 'parents': [DRIVE_FOLDER_ID]}
+                    from googleapiclient.http import MediaFileUpload
+                    media = MediaFileUpload(temp_path, mimetype='image/jpeg', resumable=True)
+                    file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                    
+                    new_foto = file.get('id')
+                    try:
+                        if os.path.exists(temp_path): os.remove(temp_path)
+                    except: pass
+                    
+                    # Simpan cache lokal
+                    with Image.open(self._foto_path) as img:
+                        img.convert("RGBA").save(os.path.join(IMAGES_DIR, f"{new_foto}.png"))
+
+                from firebase_admin import firestore
+                db = get_db()
+                update_data = {}
+                if new_foto:
+                    update_data["foto"] = new_foto
+                if stok_val > 0:
+                    update_data["stok"] = firestore.Increment(stok_val)
+                    
+                if update_data:
+                    db.collection('barang').document(id_b).update(update_data)
                 
-            query += " WHERE id_barang=%s"
-            params.append(id_b)
-            
-            execute_query(query, tuple(params))
-            messagebox.showinfo("Berhasil", "Data berhasil diupdate!", parent=self)
-            self.panel.refresh()
-            self.destroy()
-        except Exception as e:
-            messagebox.showerror("Error DB", str(e), parent=self)
+                self.after(0, self._on_success)
+            except Exception as e:
+                self.after(0, lambda ex=e: self._on_error(ex))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_success(self):
+        messagebox.showinfo("Berhasil", "Data berhasil diupdate!", parent=self)
+        self.panel.refresh()
+        self.destroy()
+
+    def _on_error(self, err):
+        messagebox.showerror("Error DB", str(err), parent=self)
+        self.btn_simpan.config(state="normal", text="Simpan Update")
