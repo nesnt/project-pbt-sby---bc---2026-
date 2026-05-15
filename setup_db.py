@@ -60,7 +60,8 @@ def run_setup():
                 id_barang    INT AUTO_INCREMENT PRIMARY KEY,
                 nama_barang  VARCHAR(100) NOT NULL,
                 harga_barang DECIMAL(10,2) NOT NULL,
-                stok         INT NOT NULL DEFAULT 0
+                stok         INT NOT NULL DEFAULT 0,
+                gambar       VARCHAR(225)
             ) ENGINE=InnoDB;
         """)
         print("[OK] Tabel 'barang' siap.")

@@ -1,0 +1,4 @@
+# Mengabaikan semua file kredensial di folder migrate agar tidak masuk ke GitHub
+migrate/*.json
+migrate/config_gdrive/
+migrate/
