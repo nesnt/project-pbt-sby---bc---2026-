@@ -9,13 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-<<<<<<< HEAD
-import pymysql.cursors
-from db import execute_query, get_connection
-from midtrans_webhook import reduce_stock
-=======
 from db import get_db
->>>>>>> 099d9731109ffb4053743896f150a6ec4c3aae72
 
 PRIMARY    = "#CC0000"
 PRIMARY_DK = "#A00000"
@@ -242,32 +236,6 @@ class KonfirmasiPanel(tk.Frame):
             self.tree.delete(item)
 
         try:
-<<<<<<< HEAD
-            base_q = (
-                "SELECT id_pesanan, tanggal, total_harga, status, "
-                "payment_status, payment_method, nama_pembeli "
-                "FROM pesanan"
-            )
-            if self._filter_val == "semua":
-                rows = execute_query(base_q + " ORDER BY tanggal DESC", fetch=True)
-            else:
-                rows = execute_query(
-                    base_q + " WHERE status=%s ORDER BY tanggal DESC",
-                    (self._filter_val,), fetch=True
-                )
-            for i, r in enumerate(rows):
-                total    = f"Rp {r['total_harga']:,.0f}"
-                tag      = r["status"]
-                pay_st   = (r.get("payment_status") or "unpaid").upper()
-                self.tree.insert("", "end", iid=str(r["id_pesanan"]),
-                                 values=(
-                                     r["id_pesanan"],
-                                     str(r["tanggal"])[:19],
-                                     total,
-                                     r["status"].upper(),
-                                     pay_st,
-                                 ),
-=======
             from firebase_admin import firestore
             db = get_db()
             if self._filter_val == "semua":
@@ -279,10 +247,15 @@ class KonfirmasiPanel(tk.Frame):
                 r = doc.to_dict()
                 total = f"Rp {r.get('total_harga', 0):,.0f}"
                 tag   = r.get("status", "")
+                pay_st = (r.get("payment_status") or "unpaid").upper()
                 self.tree.insert("", "end", iid=doc.id,
-                                 values=(doc.id[:8], str(r.get("tanggal", ""))[:19],
-                                         total, tag.upper()),
->>>>>>> 099d9731109ffb4053743896f150a6ec4c3aae72
+                                 values=(
+                                     doc.id[:8],
+                                     str(r.get("tanggal", ""))[:19],
+                                     total,
+                                     tag.upper(),
+                                     pay_st
+                                 ),
                                  tags=(tag, "alt" if i % 2 == 0 else ""))
 
             self.tree.tag_configure("pending",  foreground="#E65100")
@@ -306,25 +279,16 @@ class KonfirmasiPanel(tk.Frame):
             doc = db.collection('pesanan').document(id_pesanan).get()
             if not doc.exists:
                 return
-<<<<<<< HEAD
-            p = pesanan[0]
-            status    = p["status"]
-            pay_st    = p.get("payment_status") or "unpaid"
-            pay_meth  = p.get("payment_method") or "-"
-            tx_id     = p.get("transaction_id") or "-"
-            nama_pmb  = p.get("nama_pembeli") or "-"
-
-            self.lbl_id.config(text=f"Pesanan #{p['id_pesanan']}  |  {nama_pmb}")
-            tgl   = str(p["tanggal"])[:19]
-            total = f"Rp {p['total_harga']:,.0f}"
-=======
             p = doc.to_dict()
             status = p.get("status", "")
+            pay_st = p.get("payment_status") or "unpaid"
+            pay_meth = p.get("payment_method") or "-"
+            tx_id = p.get("transaction_id") or "-"
+            nama_pmb = p.get("nama_pembeli") or "-"
 
-            self.lbl_id.config(text=f"Pesanan #{id_pesanan[:8]}")
+            self.lbl_id.config(text=f"Pesanan #{id_pesanan[:8]}  |  {nama_pmb}")
             tgl    = str(p.get("tanggal", ""))[:19]
             total  = f"Rp {p.get('total_harga', 0):,.0f}"
->>>>>>> 099d9731109ffb4053743896f150a6ec4c3aae72
             self.lbl_status.config(
                 text=f"📅 {tgl}   |   Status: {status.upper()}",
                 fg=STATUS_COLOR.get(status, GRAY_TEXT)
@@ -368,16 +332,22 @@ class KonfirmasiPanel(tk.Frame):
 
     def _confirm_cash_manual(self):
         if not self.selected_id: return
-        if messagebox.askyesno("Konfirmasi", f"Konfirmasi pembayaran CASH untuk Pesanan #{self.selected_id}?\n\nStatus akan berubah menjadi PAID dan stok akan dikurangi."):
+        short_id = self.selected_id[:8]
+        if messagebox.askyesno("Konfirmasi", f"Konfirmasi pembayaran CASH untuk Pesanan #{short_id}?\n\nStatus akan berubah menjadi PAID dan stok akan dikurangi."):
             try:
-                # Update status pembayaran
-                execute_query(
-                    "UPDATE pesanan SET payment_status='paid', status='diterima', confirmed_at=NOW() WHERE id_pesanan=%s",
-                    (self.selected_id,)
-                )
+                import datetime
+                db = get_db()
+                doc_ref = db.collection('pesanan').document(self.selected_id)
+                # Update status pembayaran dan status pesanan di Firestore
+                doc_ref.update({
+                    'payment_status': 'paid',
+                    'status': 'diterima',
+                    'confirmed_at': datetime.datetime.now()
+                })
                 # Kurangi stok
+                from midtrans_webhook import reduce_stock
                 reduce_stock(self.selected_id)
-                messagebox.showinfo("Sukses", f"Pesanan #{self.selected_id} telah lunas (PAID).")
+                messagebox.showinfo("Sukses", f"Pesanan #{short_id} telah lunas (PAID).")
                 self._load_pesanan()
                 self._load_detail(self.selected_id)
             except Exception as e:

@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-from db import execute_query
+from db import get_db
 from midtrans_webhook import reduce_stock
 
 PRIMARY    = "#CC0000"
@@ -155,35 +155,43 @@ class PembayaranPanel(tk.Frame):
         for item in self.tv.get_children():
             self.tv.delete(item)
         try:
-            q = (
-                "SELECT id_pesanan, nama_pembeli, tanggal, total_harga, "
-                "payment_method, payment_status, transaction_id "
-                "FROM pesanan WHERE 1=1"
-            )
-            params = []
-            st_f = self.cb_status.get()
-            if st_f != "SEMUA":
-                q += " AND payment_status=%s"
-                params.append(st_f.lower())
+            db = get_db()
+            docs = db.collection('pesanan').get()
             
+            rows = []
+            for doc in docs:
+                r = doc.to_dict()
+                r["id_pesanan"] = doc.id
+                rows.append(r)
+                
+            st_f = self.cb_status.get()
             me_f = self.cb_meth.get()
-            if me_f != "SEMUA":
-                q += " AND payment_method=%s"
-                params.append(me_f)
-
-            rows = execute_query(q + " ORDER BY tanggal DESC", tuple(params), fetch=True)
+            
+            filtered_rows = []
             for r in rows:
+                ps = r.get("payment_status") or "unpaid"
+                metode = r.get("payment_method") or "-"
+                
+                if st_f != "SEMUA" and ps.upper() != st_f:
+                    continue
+                if me_f != "SEMUA" and metode.upper() != me_f:
+                    continue
+                filtered_rows.append(r)
+                
+            filtered_rows.sort(key=lambda x: x.get("tanggal", ""), reverse=True)
+            
+            for r in filtered_rows:
                 ps      = r.get("payment_status") or "unpaid"
                 em      = PAY_EMOJI.get(ps, "")
                 metode  = (r.get("payment_method") or "-").upper()
                 tx_id   = r.get("transaction_id") or "-"
                 nama    = r.get("nama_pembeli") or "-"
-                total   = f"Rp {r['total_harga']:,.0f}"
-                tgl     = str(r["tanggal"])[:19]
+                total   = f"Rp {r.get('total_harga', 0):,.0f}"
+                tgl     = str(r.get("tanggal", ""))[:19]
 
-                self.tv.insert("", "end",
+                self.tv.insert("", "end", iid=r["id_pesanan"],
                                values=(
-                                   r["id_pesanan"],
+                                   r["id_pesanan"][:8],
                                    nama,
                                    tgl,
                                    total,
@@ -230,15 +238,21 @@ class PembayaranPanel(tk.Frame):
     def _confirm_paid(self):
         sel = self.tv.selection()
         if not sel: return
-        oid = self.tv.item(sel[0], "values")[0]
-        if messagebox.askyesno("Konfirmasi", f"Konfirmasi pembayaran Cash untuk Pesanan #{oid} sebagai PAID?"):
+        oid = sel[0] # Full Firestore doc.id
+        short_id = self.tv.item(sel[0], "values")[0]
+        if messagebox.askyesno("Konfirmasi", f"Konfirmasi pembayaran Cash untuk Pesanan #{short_id} sebagai PAID?"):
             try:
-                execute_query(
-                    "UPDATE pesanan SET payment_status='paid', status='diterima', confirmed_by_admin=%s, confirmed_at=NOW() WHERE id_pesanan=%s",
-                    (self.dashboard.admin_data['username'], oid)
-                )
+                import datetime
+                db = get_db()
+                doc_ref = db.collection('pesanan').document(oid)
+                doc_ref.update({
+                    'payment_status': 'paid',
+                    'status': 'diterima',
+                    'confirmed_by_admin': self.dashboard.admin_data['username'],
+                    'confirmed_at': datetime.datetime.now()
+                })
                 reduce_stock(oid)
-                messagebox.showinfo("Sukses", f"Pesanan #{oid} telah ditandai PAID dan stok dikurangi.")
+                messagebox.showinfo("Sukses", f"Pesanan #{short_id} telah ditandai PAID dan stok dikurangi.")
                 self._load()
             except Exception as e:
                 messagebox.showerror("Error", str(e))
@@ -246,13 +260,18 @@ class PembayaranPanel(tk.Frame):
     def _reject_payment(self):
         sel = self.tv.selection()
         if not sel: return
-        oid = self.tv.item(sel[0], "values")[0]
-        if messagebox.askyesno("Tolak", f"Tolak pembayaran untuk Pesanan #{oid}?"):
+        oid = sel[0] # Full Firestore doc.id
+        short_id = self.tv.item(sel[0], "values")[0]
+        if messagebox.askyesno("Tolak", f"Tolak pembayaran untuk Pesanan #{short_id}?"):
             try:
-                execute_query(
-                    "UPDATE pesanan SET payment_status='rejected', confirmed_by_admin=%s, confirmed_at=NOW() WHERE id_pesanan=%s",
-                    (self.dashboard.admin_data['username'], oid)
-                )
+                import datetime
+                db = get_db()
+                doc_ref = db.collection('pesanan').document(oid)
+                doc_ref.update({
+                    'payment_status': 'rejected',
+                    'confirmed_by_admin': self.dashboard.admin_data['username'],
+                    'confirmed_at': datetime.datetime.now()
+                })
                 self._load()
             except Exception as e:
                 messagebox.showerror("Error", str(e))

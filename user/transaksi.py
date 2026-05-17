@@ -11,13 +11,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from PIL import Image, ImageTk, ImageDraw
 import os
-<<<<<<< HEAD
 import webbrowser
 import threading
-=======
 import requests
 from io import BytesIO
->>>>>>> 099d9731109ffb4053743896f150a6ec4c3aae72
 
 from db import get_db, get_drive_service, DRIVE_FOLDER_ID, IMAGES_DIR, API_URL
 
@@ -484,35 +481,6 @@ class TransaksiWindow(tk.Toplevel):
     def _process_checkout(self, nama_pembeli: str, method: str):
         total = sum(d["harga"]*d["jumlah"] for d in self.keranjang.values())
         try:
-<<<<<<< HEAD
-            # 1. Simpan pesanan ke DB (status awal)
-            id_pesanan = execute_query(
-                "INSERT INTO pesanan (tanggal, total_harga, status, nama_pembeli, payment_status, payment_method) VALUES (NOW(), %s, 'pending', %s, 'unpaid', %s)",
-                (total, nama_pembeli, method), fetch=False
-            )
-
-            # 2. Simpan detail
-            for id_b, item in self.keranjang.items():
-                execute_query(
-                    "INSERT INTO detail_pesanan (id_pesanan, id_barang, jumlah, subtotal) VALUES (%s, %s, %s, %s)",
-                    (id_pesanan, id_b, item["jumlah"], item["harga"]*item["jumlah"])
-                )
-
-            # 3. Jika Midtrans, buat token
-            if method == "MIDTRANS":
-                from midtrans_snap import create_snap_transaction
-                items_midtrans = [{"id": str(id_b), "price": int(d["harga"]), "quantity": d["jumlah"], "name": d["nama"][:50]} for id_b, d in self.keranjang.items()]
-                snap_token = create_snap_transaction(id_pesanan, total, nama_pembeli, items_midtrans)
-                execute_query(
-                    "UPDATE pesanan SET snap_token=%s WHERE id_pesanan=%s",
-                    (snap_token, id_pesanan)
-                )
-                import webbrowser
-                from midtrans_config import WEBHOOK_BASE
-                webbrowser.open(f"{WEBHOOK_BASE}/pay/{snap_token}")
-
-            # 4. Kosongkan keranjang & refresh
-=======
             import datetime
             db = get_db()
             doc_ref = db.collection('pesanan').document()
@@ -527,16 +495,32 @@ class TransaksiWindow(tk.Toplevel):
                 })
             
             now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            doc_ref.set({
+            
+            order_data = {
                 "tanggal": now_str,
                 "total_harga": total,
                 "status": "pending",
+                "nama_pembeli": nama_pembeli,
+                "payment_status": "unpaid",
+                "payment_method": method,
                 "detail_pesanan": details
-            })
+            }
             
-            id_pesanan = doc_ref.id[:8]
-            self._show_sukses(id_pesanan, total)
->>>>>>> 099d9731109ffb4053743896f150a6ec4c3aae72
+            # 3. Jika Midtrans, buat token
+            if method == "MIDTRANS":
+                from midtrans_snap import create_snap_transaction
+                items_midtrans = [{"id": str(id_b), "price": int(d["harga"]), "quantity": d["jumlah"], "name": d["nama"][:50]} for id_b, d in self.keranjang.items()]
+                snap_token = create_snap_transaction(doc_ref.id, total, nama_pembeli, items_midtrans)
+                order_data["snap_token"] = snap_token
+                order_data["payment_status"] = "pending"
+                
+                import webbrowser
+                from midtrans_config import WEBHOOK_BASE
+                webbrowser.open(f"{WEBHOOK_BASE}/pay/{snap_token}")
+            
+            doc_ref.set(order_data)
+            
+            id_pesanan = doc_ref.id
             self.keranjang.clear()
             self._update_cart_ui()
             self._load_barang()
@@ -597,13 +581,14 @@ class TransaksiWindow(tk.Toplevel):
             if not polling[0] or not win.winfo_exists():
                 return
             try:
-                r = execute_query(
-                    "SELECT payment_status, payment_method, snap_token FROM pesanan WHERE id_pesanan=%s",
-                    (id_pesanan,), fetch=True
-                )[0]
-                st = r["payment_status"]
-                me = (r["payment_method"] or "Belum dipilih").upper()
-                tk_snap = r["snap_token"]
+                db = get_db()
+                doc = db.collection('pesanan').document(id_pesanan).get()
+                if not doc.exists:
+                    return
+                r = doc.to_dict()
+                st = r.get("payment_status", "unpaid")
+                me = (r.get("payment_method") or "Belum dipilih").upper()
+                tk_snap = r.get("snap_token", "")
 
                 lbl_meth.config(text=f"Metode: {me}")
                 lbl_status.config(text=f"Status: {st.replace('_',' ').upper()}")
@@ -629,7 +614,7 @@ class TransaksiWindow(tk.Toplevel):
                 elif st == "waiting_confirmation":
                     msg = "🕒 Menunggu konfirmasi admin untuk pembayaran Cash.\nSilakan serahkan uang ke kasir."
                     btn_action.pack_forget()
-                elif st == "rejected":
+                elif st == "rejected" or st == "rejected":
                     msg = "❌ Pembayaran Cash ditolak admin.\nSilakan hubungi admin atau ganti metode pembayaran."
                 elif st == "unpaid" or st == "pending":
                     if me == "CASH":
@@ -649,10 +634,11 @@ class TransaksiWindow(tk.Toplevel):
 
         def _set_cash(oid):
             if messagebox.askyesno("Konfirmasi", "Yakin ingin bayar cash langsung ke toko?"):
-                execute_query(
-                    "UPDATE pesanan SET payment_method='CASH', payment_status='waiting_confirmation' WHERE id_pesanan=%s",
-                    (oid,)
-                )
+                db = get_db()
+                db.collection('pesanan').document(oid).update({
+                    'payment_method': 'CASH',
+                    'payment_status': 'waiting_confirmation'
+                })
                 _get_status()
 
         def _open_midtrans(token):
@@ -664,10 +650,11 @@ class TransaksiWindow(tk.Toplevel):
             m = messagebox.askquestion("Ganti Metode", "Ingin ganti ke Midtrans (Online) atau Cash (Offline)?\n\n'Yes' untuk Online, 'No' untuk Cash")
             new_me = "MIDTRANS" if m == "yes" else "CASH"
             new_st = "pending" if new_me == "MIDTRANS" else "unpaid"
-            execute_query(
-                "UPDATE pesanan SET payment_method=%s, payment_status=%s WHERE id_pesanan=%s",
-                (new_me, new_st, id_pesanan)
-            )
+            db = get_db()
+            db.collection('pesanan').document(id_pesanan).update({
+                'payment_method': new_me,
+                'payment_status': new_st
+            })
             _get_status()
 
         btn_change.config(command=_change_method)

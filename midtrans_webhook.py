@@ -24,30 +24,35 @@ from midtrans_config import (
     WEBHOOK_PORT,
     SNAP_JS_URL,
 )
-from db import execute_query
+from db import get_db
 
 # ── Logger ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 log = logging.getLogger("MidtransWebhook")
 
-import logging
-from db import execute_query
-
-def reduce_stock(id_pesanan: int):
-    """Mengurangi stok barang berdasarkan detail pesanan."""
+def reduce_stock(id_pesanan: str):
+    """Mengurangi stok barang berdasarkan detail pesanan di Firestore."""
     try:
-        details = execute_query(
-            "SELECT id_barang, jumlah FROM detail_pesanan WHERE id_pesanan=%s",
-            (id_pesanan,), fetch=True
-        )
+        from firebase_admin import firestore
+        db = get_db()
+        doc_ref = db.collection('pesanan').document(id_pesanan)
+        doc = doc_ref.get()
+        if not doc.exists:
+            log.warning(f"Pesanan #{id_pesanan} tidak ditemukan untuk pengurangan stok.")
+            return
+            
+        p = doc.to_dict()
+        details = p.get('detail_pesanan', [])
+        
+        batch = db.batch()
         for d in details:
-            execute_query(
-                "UPDATE barang SET stok = stok - %s WHERE id_barang = %s",
-                (d["jumlah"], d["id_barang"])
-            )
-        logging.info(f"Stok untuk Pesanan #{id_pesanan} berhasil dikurangi.")
+            b_ref = db.collection('barang').document(d["id_barang"])
+            batch.update(b_ref, {'stok': firestore.Increment(-d["jumlah"])})
+        batch.commit()
+        
+        log.info(f"Stok untuk Pesanan #{id_pesanan[:8]} berhasil dikurangi.")
     except Exception as e:
-        logging.error(f"Gagal kurangi stok: {e}")
+        log.error(f"Gagal kurangi stok: {e}")
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
@@ -201,17 +206,16 @@ def pay_finish():
 def payment_page(snap_token: str):
     """Halaman HTML pembayaran Snap — dibuka di browser pengguna."""
     try:
-        rows = execute_query(
-            "SELECT id_pesanan, total_harga, nama_pembeli FROM pesanan WHERE snap_token=%s",
-            (snap_token,), fetch=True
-        )
-        if not rows:
+        db = get_db()
+        docs = db.collection('pesanan').where('snap_token', '==', snap_token).limit(1).get()
+        if not docs:
             return "<h3>Pesanan tidak ditemukan.</h3>", 404
-        p = rows[0]
+        doc = docs[0]
+        p = doc.to_dict()
         html = _PAYMENT_HTML.format(
-            order_id_short=p["id_pesanan"],
+            order_id_short=doc.id[:8],
             customer_name=p.get("nama_pembeli") or "Pembeli",
-            total_fmt=f"{p['total_harga']:,.0f}",
+            total_fmt=f"{p.get('total_harga', 0):,.0f}",
             snap_token=snap_token,
             client_key=MIDTRANS_CLIENT_KEY,
             snap_js=SNAP_JS_URL,
@@ -245,8 +249,8 @@ def midtrans_callback():
 
         # ── Parse id_pesanan dari order_id (format: BC-{id}) ─────────────
         try:
-            id_pesanan = int(order_id.split("-")[1])
-        except (IndexError, ValueError):
+            id_pesanan = order_id.split("-")[1]
+        except IndexError:
             log.warning("Format order_id tidak dikenali: %s", order_id)
             return jsonify({"status": "error", "message": "Bad order_id"}), 400
 
@@ -279,27 +283,28 @@ def midtrans_callback():
 
 
 # ── Helper update DB ──────────────────────────────────────────────────────────
-def _update_payment(id_pesanan: int, pay_status: str,
+def _update_payment(id_pesanan: str, pay_status: str,
                     payment_method: str = "", transaction_id: str = ""):
     """Update kolom payment di tabel pesanan. Jika paid → status = diterima."""
     try:
+        db = get_db()
+        doc_ref = db.collection('pesanan').document(id_pesanan)
+        
+        updates = {
+            'payment_status': pay_status,
+            'payment_method': payment_method,
+            'transaction_id': transaction_id
+        }
+        
         if pay_status == "paid":
-            execute_query(
-                """UPDATE pesanan
-                   SET payment_status=%s, payment_method=%s, transaction_id=%s,
-                       status='diterima'
-                   WHERE id_pesanan=%s""",
-                (pay_status, payment_method, transaction_id, id_pesanan),
-            )
+            updates['status'] = 'diterima'
+            doc_ref.update(updates)
             # KURANGI STOK DISINI
             reduce_stock(id_pesanan)
         else:
-            execute_query(
-                """UPDATE pesanan
-                   SET payment_status=%s, payment_method=%s, transaction_id=%s
-                   WHERE id_pesanan=%s""",
-                (pay_status, payment_method, transaction_id, id_pesanan),
-            )
+            doc_ref.update(updates)
+            
+        log.info("Pesanan #%s → payment_status=%s", id_pesanan, pay_status)
     except Exception as e:
         log.error("DB update payment error: %s", e)
 
