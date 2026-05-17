@@ -3,6 +3,10 @@ admin/konfirmasi.py - Panel Konfirmasi Pesanan (Terima / Tolak)
 Aplikasi Business Center SMKN 13 Bandung
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 from db import get_db
@@ -22,6 +26,14 @@ STATUS_COLOR = {
     "pending":  "#E65100",
     "diterima": "#2E7D32",
     "ditolak":  "#B71C1C",
+}
+
+PAY_COLOR = {
+    "unpaid":  "#E65100",
+    "pending": "#1565C0",
+    "paid":    "#2E7D32",
+    "failed":  "#B71C1C",
+    "expired": "#757575",
 }
 
 
@@ -85,18 +97,20 @@ class KonfirmasiPanel(tk.Frame):
                   background=[("selected", "#FFD6D6")],
                   foreground=[("selected", DARK_TEXT)])
 
-        cols = ("ID", "Tanggal", "Total", "Status")
+        cols = ("ID", "Tanggal", "Total", "Status", "Pembayaran")
         self.tree = ttk.Treeview(left_panel, columns=cols,
                                   show="headings", style="Pesanan.Treeview")
-        self.tree.heading("ID",      text="ID")
-        self.tree.heading("Tanggal", text="Tanggal & Jam")
-        self.tree.heading("Total",   text="Total Harga")
-        self.tree.heading("Status",  text="Status")
+        self.tree.heading("ID",         text="ID")
+        self.tree.heading("Tanggal",    text="Tanggal & Jam")
+        self.tree.heading("Total",      text="Total Harga")
+        self.tree.heading("Status",     text="Status")
+        self.tree.heading("Pembayaran", text="Pay. Status")
 
-        self.tree.column("ID",      width=55,  anchor="center")
-        self.tree.column("Tanggal", width=160, anchor="center")
-        self.tree.column("Total",   width=120, anchor="e")
-        self.tree.column("Status",  width=90,  anchor="center")
+        self.tree.column("ID",         width=45,  anchor="center")
+        self.tree.column("Tanggal",    width=145, anchor="center")
+        self.tree.column("Total",      width=110, anchor="e")
+        self.tree.column("Status",     width=80,  anchor="center")
+        self.tree.column("Pembayaran", width=90,  anchor="center")
 
         sb_left = ttk.Scrollbar(left_panel, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb_left.set)
@@ -156,7 +170,14 @@ class KonfirmasiPanel(tk.Frame):
         self.lbl_total = tk.Label(right_panel, text="Total: -",
                                    font=("Segoe UI", 11, "bold"),
                                    bg=LIGHT_GRAY, fg=PRIMARY, anchor="e")
-        self.lbl_total.pack(fill="x", padx=12, pady=(4, 6))
+        self.lbl_total.pack(fill="x", padx=12, pady=(4, 2))
+
+        # Info pembayaran Midtrans
+        self.lbl_payment = tk.Label(right_panel, text="",
+                                    font=("Segoe UI", 8),
+                                    bg=LIGHT_GRAY, fg=GRAY_TEXT,
+                                    anchor="w", justify="left", wraplength=280)
+        self.lbl_payment.pack(fill="x", padx=12, pady=(0, 4))
 
         # Tombol aksi
         aksi_frame = tk.Frame(right_panel, bg=LIGHT_GRAY)
@@ -169,6 +190,14 @@ class KonfirmasiPanel(tk.Frame):
             command=self._terima_pesanan
         )
         self.btn_terima.pack(fill="x", pady=(0, 6))
+
+        self.btn_confirm_cash = tk.Button(
+            aksi_frame, text="💰 KONFIRMASI BAYAR CASH", font=("Segoe UI", 10, "bold"),
+            bg="#2E7D32", fg=WHITE, relief="flat", pady=8, cursor="hand2",
+            state="disabled", command=self._confirm_cash_manual
+        )
+        self.btn_confirm_cash.pack(fill="x", pady=(0, 10))
+        self.btn_confirm_cash.pack_forget() # Sembunyi default
 
         self.btn_tolak = tk.Button(
             aksi_frame, text="❌  TOLAK", font=("Segoe UI", 11, "bold"),
@@ -218,9 +247,15 @@ class KonfirmasiPanel(tk.Frame):
                 r = doc.to_dict()
                 total = f"Rp {r.get('total_harga', 0):,.0f}"
                 tag   = r.get("status", "")
+                pay_st = (r.get("payment_status") or "unpaid").upper()
                 self.tree.insert("", "end", iid=doc.id,
-                                 values=(doc.id[:8], str(r.get("tanggal", ""))[:19],
-                                         total, tag.upper()),
+                                 values=(
+                                     doc.id[:8],
+                                     str(r.get("tanggal", ""))[:19],
+                                     total,
+                                     tag.upper(),
+                                     pay_st
+                                 ),
                                  tags=(tag, "alt" if i % 2 == 0 else ""))
 
             self.tree.tag_configure("pending",  foreground="#E65100")
@@ -246,8 +281,12 @@ class KonfirmasiPanel(tk.Frame):
                 return
             p = doc.to_dict()
             status = p.get("status", "")
+            pay_st = p.get("payment_status") or "unpaid"
+            pay_meth = p.get("payment_method") or "-"
+            tx_id = p.get("transaction_id") or "-"
+            nama_pmb = p.get("nama_pembeli") or "-"
 
-            self.lbl_id.config(text=f"Pesanan #{id_pesanan[:8]}")
+            self.lbl_id.config(text=f"Pesanan #{id_pesanan[:8]}  |  {nama_pmb}")
             tgl    = str(p.get("tanggal", ""))[:19]
             total  = f"Rp {p.get('total_harga', 0):,.0f}"
             self.lbl_status.config(
@@ -255,6 +294,22 @@ class KonfirmasiPanel(tk.Frame):
                 fg=STATUS_COLOR.get(status, GRAY_TEXT)
             )
             self.lbl_total.config(text=f"Total: {total}")
+
+            # ── Info pembayaran Midtrans ──────────────────────────────────
+            pay_clr = PAY_COLOR.get(pay_st, GRAY_TEXT)
+            if hasattr(self, "lbl_payment"):
+                self.lbl_payment.config(
+                    text=f"💳 Pembayaran: {pay_st.upper()}  |  Metode: {pay_meth.upper()}\n"
+                         f"🆔 Trans ID: {tx_id}",
+                    fg=pay_clr
+                )
+
+            # Tombol Konfirmasi Cash
+            if pay_meth.upper() == "CASH" and pay_st == "waiting_confirmation":
+                self.btn_confirm_cash.pack(fill="x", pady=(0, 10), after=self.btn_terima)
+                self.btn_confirm_cash.config(state="normal")
+            else:
+                self.btn_confirm_cash.pack_forget()
 
             # Aktifkan tombol sesuai status
             if status == "pending":
@@ -275,12 +330,37 @@ class KonfirmasiPanel(tk.Frame):
         except Exception as e:
             messagebox.showerror("Error DB", str(e))
 
+    def _confirm_cash_manual(self):
+        if not self.selected_id: return
+        short_id = self.selected_id[:8]
+        if messagebox.askyesno("Konfirmasi", f"Konfirmasi pembayaran CASH untuk Pesanan #{short_id}?\n\nStatus akan berubah menjadi PAID dan stok akan dikurangi."):
+            try:
+                import datetime
+                db = get_db()
+                doc_ref = db.collection('pesanan').document(self.selected_id)
+                # Update status pembayaran dan status pesanan di Firestore
+                doc_ref.update({
+                    'payment_status': 'paid',
+                    'status': 'diterima',
+                    'confirmed_at': datetime.datetime.now()
+                })
+                # Kurangi stok
+                from midtrans_webhook import reduce_stock
+                reduce_stock(self.selected_id)
+                messagebox.showinfo("Sukses", f"Pesanan #{short_id} telah lunas (PAID).")
+                self._load_pesanan()
+                self._load_detail(self.selected_id)
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
     def _clear_detail(self):
         for item in self.tree_detail.get_children():
             self.tree_detail.delete(item)
         self.lbl_id.config(text="Pilih pesanan →")
         self.lbl_status.config(text="", fg=GRAY_TEXT)
         self.lbl_total.config(text="Total: -")
+        if hasattr(self, "lbl_payment"):
+            self.lbl_payment.config(text="", fg=GRAY_TEXT)
         self.btn_terima.config(state="disabled")
         self.btn_tolak.config(state="disabled")
         self.btn_hapus.config(state="disabled")

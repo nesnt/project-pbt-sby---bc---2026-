@@ -1,12 +1,18 @@
 """
-user/transaksi.py - Halaman Transaksi User (Tanpa Login) + Foto Produk
+user/transaksi.py - Halaman Transaksi User (Tanpa Login) + Foto Produk + Midtrans
 Aplikasi Business Center SMKN 13 Bandung
 """
 
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from PIL import Image, ImageTk, ImageDraw
 import os
+import webbrowser
+import threading
 import requests
 from io import BytesIO
 
@@ -256,11 +262,11 @@ class TransaksiWindow(tk.Toplevel):
                                         font=("Segoe UI", 9), bg=WHITE, fg=GRAY_TEXT)
         self.lbl_item_count.pack(anchor="e", padx=14)
 
-        self.btn_checkout = tk.Button(right, text="CHECKOUT",
-                                       font=("Segoe UI", 13, "bold"),
-                                       bg=ACCENT_G, fg=WHITE, relief="flat",
+        self.btn_checkout = tk.Button(right, text="💳 BAYAR SEKARANG",
+                                       font=("Segoe UI", 12, "bold"),
+                                       bg="#CC0000", fg=WHITE, relief="flat",
                                        pady=12, cursor="hand2", state="disabled",
-                                       activebackground=ACCENT_G_DK, command=self._checkout)
+                                       activebackground="#A00000", command=self._checkout)
         self.btn_checkout.pack(fill="x", pady=(6, 0))
 
         tk.Button(right, text="Kosongkan Keranjang",
@@ -415,21 +421,65 @@ class TransaksiWindow(tk.Toplevel):
         self.lbl_item_count.config(text=f"{n} jenis item")
         self.btn_checkout.config(state="normal" if n > 0 else "disabled")
 
-    # ── Checkout ──────────────────────────────────────────────────────────────
+    # ── Checkout + Midtrans ───────────────────────────────────────────────────
+    def _dialog_nama(self) -> str:
+        """Tampilkan dialog input nama pembeli. Return nama atau '' jika dilewati."""
+        nama = simpledialog.askstring(
+            "Nama Pembeli",
+            "Masukkan nama Anda (opsional):",
+            parent=self,
+            initialvalue=""
+        )
+        return (nama or "").strip()
+
     def _checkout(self):
         if not self.keranjang:
             return
+
         total     = sum(v["harga"]*v["jumlah"] for v in self.keranjang.values())
         item_list = "\n".join(
             f"  - {v['nama']} x{v['jumlah']} = Rp {v['harga']*v['jumlah']:,.0f}"
             for v in self.keranjang.values()
         )
-        if not messagebox.askyesno("Konfirmasi Checkout",
-                                    f"Pesanan Anda:\n{item_list}\n\n"
-                                    f"Total: Rp {total:,.0f}\n\n"
-                                    "Lanjutkan? (Menunggu konfirmasi admin)",
-                                    parent=self):
-            return
+        # Dialog Nama & Metode
+        dialog = tk.Toplevel(self)
+        dialog.title("Checkout")
+        dialog.geometry("350x300")
+        dialog.resizable(False, False)
+        dialog.configure(bg="#FFFFFF")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        tk.Label(dialog, text="Konfirmasi Checkout", font=("Segoe UI", 12, "bold"),
+                 bg="#FFFFFF").pack(pady=15)
+
+        tk.Label(dialog, text="Nama Pembeli:", bg="#FFFFFF").pack(anchor="w", padx=40)
+        ent_nama = tk.Entry(dialog, font=("Segoe UI", 11), relief="solid", bd=1)
+        ent_nama.pack(fill="x", padx=40, pady=5, ipady=4)
+        ent_nama.insert(0, "Pembeli Umum")
+
+        tk.Label(dialog, text="Metode Pembayaran:", bg="#FFFFFF").pack(anchor="w", padx=40, pady=(10,0))
+        var_me = tk.StringVar(value="midtrans")
+        tk.Radiobutton(dialog, text="Online (QRIS, VA, E-Wallet)", variable=var_me,
+                        value="midtrans", bg="#FFFFFF").pack(anchor="w", padx=50)
+        tk.Radiobutton(dialog, text="Cash (Bayar di Toko)", variable=var_me,
+                        value="cash", bg="#FFFFFF").pack(anchor="w", padx=50)
+
+        def _do_checkout():
+            nama = ent_nama.get().strip()
+            meth = var_me.get().upper()
+            if not nama:
+                messagebox.showwarning("Peringatan", "Isi nama pembeli!")
+                return
+            dialog.destroy()
+            self._process_checkout(nama, meth)
+
+        tk.Button(dialog, text="PROSES SEKARANG", bg="#CC0000", fg="#FFFFFF",
+                  font=("Segoe UI", 10, "bold"), relief="flat", padx=20, pady=10,
+                  command=_do_checkout).pack(pady=20)
+
+    def _process_checkout(self, nama_pembeli: str, method: str):
+        total = sum(d["harga"]*d["jumlah"] for d in self.keranjang.values())
         try:
             import datetime
             db = get_db()
@@ -445,45 +495,176 @@ class TransaksiWindow(tk.Toplevel):
                 })
             
             now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            doc_ref.set({
+            
+            order_data = {
                 "tanggal": now_str,
                 "total_harga": total,
                 "status": "pending",
+                "nama_pembeli": nama_pembeli,
+                "payment_status": "unpaid",
+                "payment_method": method,
                 "detail_pesanan": details
-            })
+            }
             
-            id_pesanan = doc_ref.id[:8]
-            self._show_sukses(id_pesanan, total)
+            # 3. Jika Midtrans, buat token
+            if method == "MIDTRANS":
+                from midtrans_snap import create_snap_transaction
+                items_midtrans = [{"id": str(id_b), "price": int(d["harga"]), "quantity": d["jumlah"], "name": d["nama"][:50]} for id_b, d in self.keranjang.items()]
+                snap_token = create_snap_transaction(doc_ref.id, total, nama_pembeli, items_midtrans)
+                order_data["snap_token"] = snap_token
+                order_data["payment_status"] = "pending"
+                
+                import webbrowser
+                from midtrans_config import WEBHOOK_BASE
+                webbrowser.open(f"{WEBHOOK_BASE}/pay/{snap_token}")
+            
+            doc_ref.set(order_data)
+            
+            id_pesanan = doc_ref.id
             self.keranjang.clear()
             self._update_cart_ui()
             self._load_barang()
+
+            # 5. Tampilkan window status
+            self._show_payment_status(id_pesanan)
+
         except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self)
+            messagebox.showerror("Error Checkout", str(e))
 
-    def _show_sukses(self, id_pesanan, total):
-        pop = tk.Toplevel(self)
-        pop.title("Pesanan Berhasil")
-        pop.geometry("360x290")
-        pop.resizable(False, False)
-        pop.configure(bg=WHITE)
-        pop.transient(self)
-        pop.grab_set()
-        x = self.winfo_x() + (self.winfo_width()-360)//2
-        y = self.winfo_y() + (self.winfo_height()-290)//2
-        pop.geometry(f"360x290+{x}+{y}")
+    def _show_payment_status(self, id_pesanan):
+        """Tampilkan window status pembayaran dan polling DB."""
+        win = tk.Toplevel(self)
+        win.title("Status Pembayaran")
+        win.geometry("400x460")
+        win.resizable(False, False)
+        win.configure(bg="#FFFFFF")
+        win.transient(self)
+        win.grab_set()
 
-        tk.Frame(pop, bg=ACCENT_G, height=8).pack(fill="x")
-        tk.Label(pop, text="Pesanan Berhasil!",
-                 font=("Segoe UI", 16, "bold"), bg=WHITE, fg=DARK_TEXT).pack(pady=(20, 4))
-        tk.Label(pop, text=f"ID Pesanan: #{id_pesanan}",
-                 font=("Segoe UI", 11), bg=WHITE, fg=GRAY_TEXT).pack()
-        tk.Label(pop, text=f"Total: Rp {total:,.0f}",
-                 font=("Segoe UI", 13, "bold"), bg=WHITE, fg=PRIMARY).pack(pady=4)
-        tk.Label(pop, text="Menunggu konfirmasi admin...",
-                 font=("Segoe UI", 10), bg=WHITE, fg="#E65100").pack(pady=(4, 16))
-        tk.Button(pop, text="OK, Tutup", font=("Segoe UI", 11, "bold"),
-                  bg=ACCENT_G, fg=WHITE, relief="flat", padx=20, pady=8,
-                  cursor="hand2", command=pop.destroy).pack()
+        # Center
+        x = self.winfo_x() + (self.winfo_width()  - 400) // 2
+        y = self.winfo_y() + (self.winfo_height() - 460) // 2
+        win.geometry(f"+{x}+{y}")
+
+        tk.Label(win, text="Informasi Pembayaran", font=("Segoe UI", 13, "bold"),
+                 bg="#FFFFFF", fg="#212121").pack(pady=(20, 10))
+
+        frame = tk.Frame(win, bg="#F5F5F5", padx=20, pady=15, relief="solid", bd=1)
+        frame.pack(fill="x", padx=30)
+
+        lbl_id = tk.Label(frame, text=f"Order ID: # {id_pesanan}", font=("Segoe UI", 10), bg="#F5F5F5")
+        lbl_id.pack(anchor="w")
+
+        lbl_meth = tk.Label(frame, text="Metode: -", font=("Segoe UI", 10), bg="#F5F5F5")
+        lbl_meth.pack(anchor="w", pady=2)
+
+        lbl_status = tk.Label(frame, text="Status: CHECKING...", font=("Segoe UI", 11, "bold"),
+                               bg="#F5F5F5", fg="#CC0000")
+        lbl_status.pack(anchor="w", pady=(5, 0))
+
+        lbl_msg = tk.Label(win, text="Mohon tunggu...", font=("Segoe UI", 9),
+                            bg="#FFFFFF", fg="#757575", wraplength=340, justify="center")
+        lbl_msg.pack(pady=15)
+
+        btn_action = tk.Button(win, text="BAYAR SEKARANG", font=("Segoe UI", 10, "bold"),
+                                bg="#CC0000", fg="#FFFFFF", relief="flat", padx=20, pady=8)
+        btn_action.pack(pady=5)
+        btn_action.pack_forget()
+
+        btn_change = tk.Button(win, text="🔄 Ganti Metode Pembayaran", font=("Segoe UI", 9),
+                                bg="#F5F5F5", fg="#212121", relief="flat", padx=10, pady=5)
+        btn_change.pack(pady=5)
+
+        polling = [True]
+
+        def _get_status():
+            if not polling[0] or not win.winfo_exists():
+                return
+            try:
+                db = get_db()
+                doc = db.collection('pesanan').document(id_pesanan).get()
+                if not doc.exists:
+                    return
+                r = doc.to_dict()
+                st = r.get("payment_status", "unpaid")
+                me = (r.get("payment_method") or "Belum dipilih").upper()
+                tk_snap = r.get("snap_token", "")
+
+                lbl_meth.config(text=f"Metode: {me}")
+                lbl_status.config(text=f"Status: {st.replace('_',' ').upper()}")
+
+                # Warna status
+                colors = {
+                    "paid": "#2E7D32", 
+                    "pending": "#1565C0", 
+                    "waiting_confirmation": "#E65100",
+                    "rejected": "#B71C1C",
+                    "failed": "#B71C1C",
+                    "expired": "#757575",
+                    "unpaid": "#CC0000"
+                }
+                lbl_status.config(fg=colors.get(st, "#CC0000"))
+
+                msg = "Mohon tunggu konfirmasi dari sistem."
+                if st == "paid":
+                    msg = "✅ Pembayaran Berhasil!\nPesanan Anda sedang diproses oleh admin."
+                    btn_action.pack_forget()
+                    btn_change.pack_forget()
+                    polling[0] = False
+                elif st == "waiting_confirmation":
+                    msg = "🕒 Menunggu konfirmasi admin untuk pembayaran Cash.\nSilakan serahkan uang ke kasir."
+                    btn_action.pack_forget()
+                elif st == "rejected" or st == "rejected":
+                    msg = "❌ Pembayaran Cash ditolak admin.\nSilakan hubungi admin atau ganti metode pembayaran."
+                elif st == "unpaid" or st == "pending":
+                    if me == "CASH":
+                        msg = "Silakan tekan tombol di bawah untuk konfirmasi\nbahwa Anda akan membayar cash di kasir."
+                        btn_action.config(text="SAYA AKAN BAYAR CASH", command=lambda: _set_cash(id_pesanan))
+                        btn_action.pack()
+                    else:
+                        msg = "Silakan selesaikan pembayaran Anda\nmelalui jendela Midtrans di browser."
+                        btn_action.config(text="BAYAR VIA MIDTRANS", command=lambda: _open_midtrans(tk_snap))
+                        btn_action.pack()
+
+                lbl_msg.config(text=msg)
+            except Exception: pass
+            
+            if polling[0] and win.winfo_exists():
+                win.after(4000, _get_status)
+
+        def _set_cash(oid):
+            if messagebox.askyesno("Konfirmasi", "Yakin ingin bayar cash langsung ke toko?"):
+                db = get_db()
+                db.collection('pesanan').document(oid).update({
+                    'payment_method': 'CASH',
+                    'payment_status': 'waiting_confirmation'
+                })
+                _get_status()
+
+        def _open_midtrans(token):
+            import webbrowser
+            from midtrans_config import WEBHOOK_BASE
+            webbrowser.open(f"{WEBHOOK_BASE}/pay/{token}")
+
+        def _change_method():
+            m = messagebox.askquestion("Ganti Metode", "Ingin ganti ke Midtrans (Online) atau Cash (Offline)?\n\n'Yes' untuk Online, 'No' untuk Cash")
+            new_me = "MIDTRANS" if m == "yes" else "CASH"
+            new_st = "pending" if new_me == "MIDTRANS" else "unpaid"
+            db = get_db()
+            db.collection('pesanan').document(id_pesanan).update({
+                'payment_method': new_me,
+                'payment_status': new_st
+            })
+            _get_status()
+
+        btn_change.config(command=_change_method)
+        _get_status()
+
+        def _on_close():
+            polling[0] = False
+            win.destroy()
+        
+        win.protocol("WM_DELETE_WINDOW", _on_close)
 
     def _kembali(self):
         """Tutup window transaksi dan kembali ke halaman pilih mode."""

@@ -3,6 +3,10 @@ admin/dashboard.py - Dashboard utama admin
 Aplikasi Business Center SMKN 13 Bandung
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import tkinter as tk
 from tkinter import messagebox
 from db import get_db
@@ -62,9 +66,10 @@ class AdminDashboard(tk.Toplevel):
 
         # Menu item
         menus = [
-            ("🏠  Dashboard",        "home"),
-            ("📦  Kelola Barang",    "barang"),
-            ("📋  Konfirmasi Pesanan","konfirmasi"),
+            ("🏠  Dashboard",          "home"),
+            ("📦  Kelola Barang",      "barang"),
+            ("📋  Konfirmasi Pesanan", "konfirmasi"),
+            ("💳  Status Pembayaran",  "pembayaran"),
         ]
         for label, key in menus:
             btn = tk.Button(
@@ -108,6 +113,8 @@ class AdminDashboard(tk.Toplevel):
             self._show_barang()
         elif key == "konfirmasi":
             self._show_konfirmasi()
+        elif key == "pembayaran":
+            self._show_pembayaran()
 
     def _show_home(self):
         for k, btn in self.sidebar_btns.items():
@@ -130,6 +137,13 @@ class AdminDashboard(tk.Toplevel):
             self.active_frame.destroy()
         from admin.konfirmasi import KonfirmasiPanel
         self.active_frame = KonfirmasiPanel(self.content_area, self)
+        self.active_frame.pack(fill="both", expand=True)
+
+    def _show_pembayaran(self):
+        if self.active_frame:
+            self.active_frame.destroy()
+        from admin.pembayaran import PembayaranPanel
+        self.active_frame = PembayaranPanel(self.content_area, self)
         self.active_frame.pack(fill="both", expand=True)
 
     def _logout(self):
@@ -166,8 +180,9 @@ class HomeDashboard(tk.Frame):
         cards_data = [
             ("📦", "Total Barang",      str(stats["barang"]),    CARD_COLORS[0]),
             ("⏳", "Pesanan Pending",   str(stats["pending"]),   CARD_COLORS[1]),
-            ("✅", "Pesanan Diterima", str(stats["diterima"]),   CARD_COLORS[2]),
-            ("❌", "Pesanan Ditolak",  str(stats["ditolak"]),    CARD_COLORS[3]),
+            ("✅", "Pesanan Diterima", str(stats["diterima"]),  CARD_COLORS[2]),
+            ("❌", "Pesanan Ditolak",  str(stats["ditolak"]),   CARD_COLORS[3]),
+            ("💳", "Pembayaran Paid",  str(stats["paid"]),      "#00796B"),
         ]
         for i, (icon, label, value, color) in enumerate(cards_data):
             self._make_stat_card(stats_frame, icon, label, value, color, col=i)
@@ -213,22 +228,22 @@ class HomeDashboard(tk.Frame):
     def _get_stats(self) -> dict:
         try:
             db = get_db()
-            # In Firestore, getting counts can be done with count() queries if supported,
-            # or by retrieving the snapshot length.
             barang_len = len(db.collection('barang').get())
             pending_len = len(db.collection('pesanan').where('status', '==', 'pending').get())
             diterima_len = len(db.collection('pesanan').where('status', '==', 'diterima').get())
             ditolak_len = len(db.collection('pesanan').where('status', '==', 'ditolak').get())
+            paid_len = len(db.collection('pesanan').where('payment_status', '==', 'paid').get())
             
             return {
                 "barang":   barang_len,
                 "pending":  pending_len,
                 "diterima": diterima_len,
                 "ditolak":  ditolak_len,
+                "paid":     paid_len,
             }
         except Exception as e:
             print(f"Error _get_stats: {e}")
-            return {"barang": 0, "pending": 0, "diterima": 0, "ditolak": 0}
+            return {"barang": 0, "pending": 0, "diterima": 0, "ditolak": 0, "paid": 0}
 
     def _build_recent_table(self, parent):
         import tkinter.ttk as ttk
@@ -244,18 +259,20 @@ class HomeDashboard(tk.Frame):
                         background=PRIMARY, foreground=WHITE)
         style.map("Recent.Treeview", background=[("selected", "#FFE0E0")])
 
-        cols = ("ID", "Tanggal", "Total", "Status")
+        cols = ("ID", "Tanggal", "Total", "Status", "Pembayaran")
         tv   = ttk.Treeview(parent, columns=cols, show="headings",
                             style="Recent.Treeview", height=6)
-        tv.heading("ID",      text="ID Pesanan")
-        tv.heading("Tanggal", text="Tanggal")
-        tv.heading("Total",   text="Total Harga")
-        tv.heading("Status",  text="Status")
+        tv.heading("ID",         text="ID Pesanan")
+        tv.heading("Tanggal",    text="Tanggal")
+        tv.heading("Total",      text="Total Harga")
+        tv.heading("Status",     text="Status")
+        tv.heading("Pembayaran", text="Pay. Status")
 
-        tv.column("ID",      width=90,  anchor="center")
-        tv.column("Tanggal", width=160, anchor="center")
-        tv.column("Total",   width=130, anchor="e")
-        tv.column("Status",  width=100, anchor="center")
+        tv.column("ID",         width=80,  anchor="center")
+        tv.column("Tanggal",    width=150, anchor="center")
+        tv.column("Total",      width=120, anchor="e")
+        tv.column("Status",     width=90,  anchor="center")
+        tv.column("Pembayaran", width=90,  anchor="center")
 
         sb = ttk.Scrollbar(parent, orient="vertical", command=tv.yview)
         tv.configure(yscrollcommand=sb.set)
@@ -270,6 +287,13 @@ class HomeDashboard(tk.Frame):
             for doc in docs:
                 r = doc.to_dict()
                 total = f"Rp {r.get('total_harga', 0):,.0f}"
-                tv.insert("", "end", values=(doc.id[:8], r.get("tanggal", ""), total, r.get("status", "").upper()))
+                pay_st = (r.get("payment_status") or "unpaid").upper()
+                tv.insert("", "end", values=(
+                    doc.id[:8],
+                    r.get("tanggal", ""),
+                    total,
+                    r.get("status", "").upper(),
+                    pay_st
+                ))
         except Exception as e:
             print(f"Error recent_table: {e}")

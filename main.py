@@ -7,7 +7,17 @@ from tkinter import messagebox
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(__file__))
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+# Tambahkan path project ke sys.path
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 # ─── Konstanta ────────────────────────────────────────────────────────────────
 PRIMARY    = "#CC0000"
@@ -162,5 +172,27 @@ class MainApp(tk.Tk):
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    try:
+        from db import get_connection, run_migrations
+        conn = get_connection()
+        conn.close()
+        run_migrations()
+    except Exception as e:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "Koneksi Database Gagal",
+            f"{e}\n\nPastikan:\n1. MySQL sudah berjalan\n"
+            "2. Konfigurasi di db.py sudah benar\n3. Sudah menjalankan setup_db.py"
+        )
+        sys.exit(1)
+
+    # ── Jalankan Flask webhook server Midtrans di background ─────────────────
+    try:
+        from midtrans_webhook import ensure_webhook_running
+        ensure_webhook_running()
+    except Exception as _we:
+        print(f"[Warning] Webhook Midtrans tidak bisa dijalankan: {_we}")
+
     app = MainApp()
     app.mainloop()
