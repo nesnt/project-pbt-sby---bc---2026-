@@ -172,18 +172,16 @@ class MainApp(tk.Tk):
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # ── Verifikasi Koneksi Firestore ──────────────────────────────────────────
     try:
-        from db import get_connection, run_migrations
-        conn = get_connection()
-        conn.close()
-        run_migrations()
+        from db import get_db
+        db = get_db()
     except Exception as e:
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror(
-            "Koneksi Database Gagal",
-            f"{e}\n\nPastikan:\n1. MySQL sudah berjalan\n"
-            "2. Konfigurasi di db.py sudah benar\n3. Sudah menjalankan setup_db.py"
+            "Koneksi Firebase Gagal",
+            f"{e}\n\nPastikan file konfigurasi Firebase Anda (serviceAccountKey.json) diletakkan dengan benar di root project."
         )
         sys.exit(1)
 
