@@ -11,8 +11,8 @@ CARA PAKAI:
 
 # ── Kunci Midtrans Sandbox ────────────────────────────────────────────────────
 # GANTI dengan kunci Anda dari https://dashboard.sandbox.midtrans.com
-MIDTRANS_SERVER_KEY  = "Mid-server-nJx_flcEeLfCVPDZ2u789Apl"
-MIDTRANS_CLIENT_KEY  = "Mid-client-OKlasjOEE6sUxzns"
+MIDTRANS_SERVER_KEY  = "Mid-server-gKuAsozpTw2LMGToRKCzXQ1i"
+MIDTRANS_CLIENT_KEY  = "Mid-client-jtvmm79T8QDY0u_7"
 
 # Ubah ke True hanya saat production
 MIDTRANS_IS_PRODUCTION = False
